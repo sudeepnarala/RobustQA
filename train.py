@@ -44,7 +44,7 @@ def prepare_eval_data(dataset_dict, tokenizer):
         sample_index = sample_mapping[i]
         tokenized_examples["id"].append(dataset_dict["id"][sample_index])
         tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
-        dataset_idx[dataset_dict['dataset']].append(sample_index)
+        dataset_idx[dataset_dict['dataset'][sample_index]].append(sample_index)
         # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
         # position is part of the context or not.
         tokenized_examples["offset_mapping"][i] = [
@@ -78,7 +78,7 @@ def prepare_train_data(dataset_dict, tokenizer):
         # We will label impossible answers with the index of the CLS token.
         input_ids = tokenized_examples["input_ids"][i]
         cls_index = input_ids.index(tokenizer.cls_token_id)
-        tokenized_examples
+        tokenized_examples['dataset'] = []
         # Grab the sequence corresponding to that example (to know what is the context and what is the question).
         sequence_ids = tokenized_examples.sequence_ids(i)
 
@@ -90,7 +90,9 @@ def prepare_train_data(dataset_dict, tokenizer):
         end_char = start_char + len(answer['text'][0])
         tokenized_examples['id'].append(dataset_dict['id'][sample_index])
         tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
-        dataset_idx[dataset_dict['dataset']].append(sample_index)
+        import pdb
+        pdb.set_trace()
+        dataset_idx[dataset_dict['dataset'][sample_index]].append(sample_index)
         # Start token index of the current span in the text.
         token_start_index = 0
         while sequence_ids[token_start_index] != 1:
@@ -130,7 +132,8 @@ def prepare_train_data(dataset_dict, tokenizer):
 def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
     #TODO: cache this if possible
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
-    if os.path.exists(cache_path) and not args.recompute_features:
+    #TODO: FIX_SN: Remove cache
+    if False and os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
@@ -211,11 +214,25 @@ class Trainer():
         params -= alpha*grad
         return params
 
+    def stack_on_all_keys(self, list_d):
+        ret = {}
+        for d in list_d:
+            for key in d:
+                if key not in ret:
+                    ret[key] = d[key]
+                else:
+                    ret[key] = torch.cat((ret[key], d[key]), dim=0)
+
+        return ret
+
     def outer_step(self, task_batch, model: DistilBertForQuestionAnswering):
         outer_loss_batch = []
         qa_outputs_weight = copy.copy(model.qa_outputs.weight)
         for task in task_batch:
             qa_support, qa_query = task
+            # Stack
+            import pdb
+            pdb.set_trace()
             qa_support = qa_support.to(self.device)
             qa_query = qa_query.to(self.device)
             params = self.inner_loop(qa_support, model)
@@ -347,7 +364,7 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
         dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
     data_encodings, dataset_idx = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
-    return util.QADataset_Meta(data_encodings, args, dataset_idx, train=(split_name=='train')), dataset_dict
+    return util.QADataset_Meta(data_encodings, dataset_idx, args, train=(split_name=='train')), dataset_dict
 
 def main():
     # define parser and arguments
@@ -368,6 +385,7 @@ def main():
         log = util.get_logger(args.save_dir, 'log_train')
         log.info(f'Args: {json.dumps(vars(args), indent=4, sort_keys=True)}')
         log.info("Preparing Training Data...")
+        # try:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         trainer = Trainer(args, log)
         train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train')
@@ -379,6 +397,10 @@ def main():
         val_loader = DataLoader(val_dataset,
                                 batch_size=1, #CHANGE LATER
                                 sampler=SequentialSampler(val_dataset))
+        # except Exception as e:
+        #     import pdb; pdb.set_trace()
+        # import pdb
+        # pdb.set_trace()
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')

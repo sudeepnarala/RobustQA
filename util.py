@@ -202,17 +202,19 @@ class QADataset_Meta(Dataset):
 
     def __getitem__(self, idx):
         batch = []
+        # import pdb
+        # pdb.set_trace()
         for k in self.dataset_idx.keys():
             questions_support, questions_query = [], []
             idx_list = self.dataset_idx[k]
-            for i in idx_list[self.bs*idx, self.bs*(idx+1)]:
+            for i in idx_list[self.bs*idx: self.bs*(idx+1)]:
                 item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
-                questions_query.append(item)
+                questions_support.append(item)
             sups = idx_list[0: self.bs*idx] + idx_list[self.bs*(idx+1):]
             sup_idxs = random.sample(sups, self.num_support)
             for i in sup_idxs:
                 item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
-                questions_support.append(item)
+                questions_query.append(item)
 
             task = (questions_support, questions_query)
             batch.append(task)
@@ -251,7 +253,7 @@ def read_squad(path):
     for idx, qid in enumerate(data_dict['id']):
         id_map[qid].append(idx)
 
-    data_dict_collapsed = {'question': [], 'context': [], 'id': []}
+    data_dict_collapsed = {'question': [], 'context': [], 'id': [], "dataset": []}
     if data_dict['answer']:
         data_dict_collapsed['answer'] = []
     for qid in id_map:
@@ -259,6 +261,7 @@ def read_squad(path):
         data_dict_collapsed['question'].append(data_dict['question'][ex_ids[0]])
         data_dict_collapsed['context'].append(data_dict['context'][ex_ids[0]])
         data_dict_collapsed['id'].append(qid)
+        data_dict_collapsed['dataset'].append(data_dict["dataset"][ex_ids[0]])
         if data_dict['answer']:
             all_answers = [data_dict['answer'][idx] for idx in ex_ids]
             data_dict_collapsed['answer'].append({'answer_start': [answer['answer_start'] for answer in all_answers],
