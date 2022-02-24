@@ -219,7 +219,10 @@ class QADataset_Meta(Dataset):
         return batch
 
     def __len__(self):
-        return int(len(self.encodings['input_ids'])/self.num_query)
+        m = float('inf')
+        for k in self.dataset_idx.keys():
+            m = min(len(self.dataset_idx[k]), m)
+        return int(m/self.num_query)
 
 
 
