@@ -21,6 +21,8 @@ def get_train_test_args():
     parser.add_argument('--do-eval', action='store_true')
     parser.add_argument('--sub-file', type=str, default='')
     parser.add_argument('--visualize-predictions', action='store_true')
+    parser.add_argument('--num_query', type=int, default=3)
+    parser.add_argument('--num_support', type=int, default=3)
     parser.add_argument('--eval-every', type=int, default=5000)
     args = parser.parse_args()
     return args

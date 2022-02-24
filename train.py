@@ -10,7 +10,7 @@ from transformers import DistilBertForQuestionAnswering
 from transformers import AdamW
 from tensorboardX import SummaryWriter
 
-
+from collections import defaultdict
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import RandomSampler, SequentialSampler
 from args import get_train_test_args
@@ -29,16 +29,20 @@ def prepare_eval_data(dataset_dict, tokenizer):
     # Since one example might give us several features if it has a long context, we need a map from a feature to
     # its corresponding example. This key gives us just that.
     sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
-
+    dataset_idx = defaultdict(lambda : [])
     # For evaluation, we will need to convert our predictions to substrings of the context, so we keep the
     # corresponding example_id and we will store the offset mappings.
     tokenized_examples["id"] = []
+    tokenized_examples['dataset'] = []
     for i in tqdm(range(len(tokenized_examples["input_ids"]))):
         # Grab the sequence corresponding to that example (to know what is the context and what is the question).
         sequence_ids = tokenized_examples.sequence_ids(i)
+        
         # One example can give several spans, this is the index of the example containing this span of text.
         sample_index = sample_mapping[i]
         tokenized_examples["id"].append(dataset_dict["id"][sample_index])
+        tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
+        dataset_idx[dataset_dict['dataset']].append(sample_index)
         # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
         # position is part of the context or not.
         tokenized_examples["offset_mapping"][i] = [
@@ -46,7 +50,7 @@ def prepare_eval_data(dataset_dict, tokenizer):
             for k, o in enumerate(tokenized_examples["offset_mapping"][i])
         ]
 
-    return tokenized_examples
+    return tokenized_examples, dataset_idx
 
 
 
@@ -61,17 +65,18 @@ def prepare_train_data(dataset_dict, tokenizer):
                                    padding='max_length')
     sample_mapping = tokenized_examples["overflow_to_sample_mapping"]
     offset_mapping = tokenized_examples["offset_mapping"]
-
+    dataset_idx = defaultdict(lambda : [])
     # Let's label those examples!
     tokenized_examples["start_positions"] = []
     tokenized_examples["end_positions"] = []
     tokenized_examples['id'] = []
+    tokenized_examples['dataset'] = []
     inaccurate = 0
     for i, offsets in enumerate(tqdm(offset_mapping)):
         # We will label impossible answers with the index of the CLS token.
         input_ids = tokenized_examples["input_ids"][i]
         cls_index = input_ids.index(tokenizer.cls_token_id)
-
+        tokenized_examples
         # Grab the sequence corresponding to that example (to know what is the context and what is the question).
         sequence_ids = tokenized_examples.sequence_ids(i)
 
@@ -82,6 +87,8 @@ def prepare_train_data(dataset_dict, tokenizer):
         start_char = answer['answer_start'][0]
         end_char = start_char + len(answer['text'][0])
         tokenized_examples['id'].append(dataset_dict['id'][sample_index])
+        tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
+        dataset_idx[dataset_dict['dataset']].append(sample_index)
         # Start token index of the current span in the text.
         token_start_index = 0
         while sequence_ids[token_start_index] != 1:
@@ -114,7 +121,7 @@ def prepare_train_data(dataset_dict, tokenizer):
 
     total = len(tokenized_examples['id'])
     print(f"Preprocessing not completely accurate for {inaccurate}/{total} instances")
-    return tokenized_examples
+    return tokenized_examples, dataset_idx
 
 
 
@@ -125,11 +132,11 @@ def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, spli
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
-            tokenized_examples = prepare_train_data(dataset_dict, tokenizer)
+            tokenized_examples, dataset_idx = prepare_train_data(dataset_dict, tokenizer)
         else:
-            tokenized_examples = prepare_eval_data(dataset_dict, tokenizer)
+            tokenized_examples, dataset_idx = prepare_eval_data(dataset_dict, tokenizer)
         util.save_pickle(tokenized_examples, cache_path)
-    return tokenized_examples
+    return tokenized_examples, dataset_idx
 
 
 
@@ -248,8 +255,8 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
         dataset_name += f'_{dataset}'
         dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
-    data_encodings = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
-    return util.QADataset(data_encodings, train=(split_name=='train')), dataset_dict
+    data_encodings, dataset_idx = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
+    return util.QADataset_Meta(data_encodings, args, dataset_idx, train=(split_name=='train')), dataset_dict
 
 def main():
     # define parser and arguments
@@ -272,10 +279,10 @@ def main():
         log.info("Preparing Validation Data...")
         val_dataset, val_dict = get_dataset(args, args.train_datasets, args.val_dir, tokenizer, 'val')
         train_loader = DataLoader(train_dataset,
-                                batch_size=args.batch_size,
+                                batch_size=1, #CHANGE LATER
                                 sampler=RandomSampler(train_dataset))
         val_loader = DataLoader(val_dataset,
-                                batch_size=args.batch_size,
+                                batch_size=1, #CHANGE LATER
                                 sampler=SequentialSampler(val_dataset))
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:

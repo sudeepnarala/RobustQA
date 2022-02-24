@@ -186,11 +186,47 @@ class QADataset(Dataset):
     def __len__(self):
         return len(self.encodings['input_ids'])
 
+class QADataset_Meta(Dataset):
+    def __init__(self, encodings, dataset_idx, args, train=True):
+        self.encodings = encodings
+        self.keys = ['input_ids', 'attention_mask']
+        #self.sampling_type = 'uniform'
+        self.num_support = args.num_support
+        self.num_query = args.num_query
+        self.bs = args.batch_size
+        self.dataset_idx = dataset_idx
+        if train:
+            self.keys += ['start_positions', 'end_positions']
+        assert(all(key in self.encodings for key in self.keys))
+
+    def __getitem__(self, idx):
+        batch = []
+        for k in self.dataset_idx.keys():
+            questions_support, questions_query = [], []
+            idx_list = self.dataset_idx[k]
+            for i in idx_list[self.bs*idx, self.bs*(idx+1)]:
+                item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
+                questions_query.append(item)
+            sups = idx_list[0: self.bs*idx] + idx_list[self.bs*(idx+1):]
+            sup_idxs = random.sample(sups, self.num_support)
+            for i in sup_idxs:
+                item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
+                questions_support.append(item)
+
+            task = (questions_support, questions_query)
+            batch.append(task)
+        return batch
+
+    def __len__(self):
+        return int(len(self.encodings['input_ids'])/self.num_query)
+
+
+
 def read_squad(path):
     path = Path(path)
     with open(path, 'rb') as f:
         squad_dict = json.load(f)
-    data_dict = {'question': [], 'context': [], 'id': [], 'answer': []}
+    data_dict = {'question': [], 'context': [], 'id': [], 'answer': [], 'dataset': []}
     for group in squad_dict['data']:
         for passage in group['paragraphs']:
             context = passage['context']
@@ -205,6 +241,7 @@ def read_squad(path):
                         data_dict['question'].append(question)
                         data_dict['context'].append(context)
                         data_dict['id'].append(qa['id'])
+                        data_dict['dataset'].append(path)
                         data_dict['answer'].append(answer)
     id_map = ddict(list)
     for idx, qid in enumerate(data_dict['id']):
