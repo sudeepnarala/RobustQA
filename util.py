@@ -12,6 +12,7 @@ import numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset
 
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
