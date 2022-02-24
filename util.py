@@ -209,22 +209,22 @@ class QADataset_Meta(Dataset):
             idx_list = self.dataset_idx[k]
             for i in idx_list[self.bs*idx: self.bs*(idx+1)]:
                 item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
-                questions_support.append(item)
+                questions_query.append(item)
             sups = idx_list[0: self.bs*idx] + idx_list[self.bs*(idx+1):]
             sup_idxs = random.sample(sups, self.num_support)
             for i in sup_idxs:
                 item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
-                questions_query.append(item)
-
-            task = (questions_support, questions_query)
-            batch.append(task)
+                questions_support.append(item)
+            if len(questions_query) != 0:
+                task = (questions_support, questions_query)
+                batch.append(task)
         return batch
 
     def __len__(self):
-        m = float('inf')
+        m = float('-inf')
         for k in self.dataset_idx.keys():
-            m = min(len(self.dataset_idx[k]), m)
-        return int(m/self.num_query)
+            m = max(len(self.dataset_idx[k]), m)
+        return int(m/self.num_query) + 1
 
 
 
