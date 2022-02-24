@@ -199,7 +199,7 @@ class Trainer():
         alpha = 0.4     # Learning rate, default from MAML code
         out = model(**qa)
         loss = out[0]
-        params = model.qa_outputs
+        params = model.qa_outputs.weight
         grad = torch.autograd.grad(loss, model.qa_outputs, create_graph=True)[0]
         params -= alpha*grad
         return params
