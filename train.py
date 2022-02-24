@@ -57,14 +57,7 @@ def prepare_eval_data(dataset_dict, tokenizer):
 
 
 def prepare_train_data(dataset_dict, tokenizer):
-    tokenized_examples = tokenizer(dataset_dict['question'],
-                                   dataset_dict['context'],
-                                   truncation="only_second",
-                                   stride=128,
-                                   max_length=384,
-                                   return_overflowing_tokens=True,
-                                   return_offsets_mapping=True,
-                                   padding='max_length')
+    tokenized_examples = tokenizer(dataset_dict['question'], dataset_dict['context'], truncation="only_second",stride=128,max_length=384,return_overflowing_tokens=True,return_offsets_mapping=True,padding='max_length')
     sample_mapping = tokenized_examples["overflow_to_sample_mapping"]
     offset_mapping = tokenized_examples["offset_mapping"]
     dataset_idx = defaultdict(lambda : [])
@@ -90,9 +83,7 @@ def prepare_train_data(dataset_dict, tokenizer):
         end_char = start_char + len(answer['text'][0])
         tokenized_examples['id'].append(dataset_dict['id'][sample_index])
         tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
-        import pdb
-        pdb.set_trace()
-        dataset_idx[dataset_dict['dataset'][sample_index]].append(sample_index)
+        dataset_idx[dataset_dict['dataset'][sample_index]].append(i)
         # Start token index of the current span in the text.
         token_start_index = 0
         while sequence_ids[token_start_index] != 1:
@@ -228,11 +219,13 @@ class Trainer():
     def outer_step(self, task_batch, model: DistilBertForQuestionAnswering):
         outer_loss_batch = []
         qa_outputs_weight = copy.copy(model.qa_outputs.weight)
+    #    import pdb
+    #    pdb.set_trace()
         for task in task_batch:
             qa_support, qa_query = task
+            if not qa_support:
+                continue
             # Stack
-            import pdb
-            pdb.set_trace()
             qa_support = qa_support.to(self.device)
             qa_query = qa_query.to(self.device)
             params = self.inner_loop(qa_support, model)

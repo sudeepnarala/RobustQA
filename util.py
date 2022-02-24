@@ -202,15 +202,13 @@ class QADataset_Meta(Dataset):
 
     def __getitem__(self, idx):
         batch = []
-        # import pdb
-        # pdb.set_trace()
         for k in self.dataset_idx.keys():
             questions_support, questions_query = [], []
             idx_list = self.dataset_idx[k]
-            for i in idx_list[self.bs*idx: self.bs*(idx+1)]:
+            for i in idx_list[self.num_query*idx: self.num_query*(idx+1)]:
                 item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
                 questions_query.append(item)
-            sups = idx_list[0: self.bs*idx] + idx_list[self.bs*(idx+1):]
+            sups = idx_list[0: self.num_query*idx] + idx_list[self.num_query*(idx+1):]
             sup_idxs = random.sample(sups, self.num_support)
             for i in sup_idxs:
                 item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
@@ -218,6 +216,8 @@ class QADataset_Meta(Dataset):
             if len(questions_query) != 0:
                 task = (questions_support, questions_query)
                 batch.append(task)
+            import pdb
+            pdb.set_trace()
         return batch
 
     def __len__(self):
