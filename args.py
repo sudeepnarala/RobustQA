@@ -23,7 +23,7 @@ def get_train_test_args():
     parser.add_argument('--visualize-predictions', action='store_true')
     parser.add_argument('--eval-every', type=int, default=5000)
 
-
-    parser.add_argument("--meta", action="store_true")
+    parser.add_argument("--num-support", type=int, default=10)
+    parser.add_argument("--num-query", type=int, default=100)
     args = parser.parse_args()
     return args

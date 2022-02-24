@@ -5,9 +5,15 @@ import torch
 class ParallelModel(DistilBertForQuestionAnswering):
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
+        init_parallel = False
+        if "init_parallel" in kwargs:
+            if kwargs["init_parallel"]:
+                init_parallel = True
+            del kwargs["init_parallel"]
         s = super(ParallelModel, cls).from_pretrained(*args, **kwargs)
         s.parallel = torch.nn.Linear(768, 2, bias=True)
-        torch.nn.init.xavier_normal_(s.parallel.weight)
+        if init_parallel:
+            torch.nn.init.xavier_normal_(s.parallel.weight)
         s.dropout2 = torch.nn.Dropout(p=0.1, inplace=False)
         # s.forward = cls.forward
         return s
@@ -24,7 +30,7 @@ class ParallelModel(DistilBertForQuestionAnswering):
             output_attentions=None,
             output_hidden_states=None,
             return_dict=None,
-            meta_learning=False,
+            weights=None
     ):
         r"""
         start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -50,7 +56,12 @@ class ParallelModel(DistilBertForQuestionAnswering):
         hidden_states = distilbert_output[0]  # (bs, max_query_len, dim)
 
         hidden_states = self.dropout(hidden_states)  # (bs, max_query_len, dim)
-        logits = self.parallel(hidden_states)  # (bs, max_query_len, 2)
+        if weights is not None:
+            linear_layer = torch.nn.Linear(768, 2)
+            linear_layer.weight = weights
+        else:
+            linear_layer = self.parallel
+        logits = linear_layer(hidden_states)  # (bs, max_query_len, 2)
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
         end_logits = end_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
@@ -71,7 +82,6 @@ class ParallelModel(DistilBertForQuestionAnswering):
             start_loss = loss_fct(start_logits, start_positions)
             end_loss = loss_fct(end_logits, end_positions)
             total_loss = (start_loss + end_loss) / 2
-
         if not return_dict:
             output = (start_logits, end_logits) + distilbert_output[1:]
             return ((total_loss,) + output) if total_loss is not None else output
