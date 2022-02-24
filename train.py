@@ -159,8 +159,10 @@ class Trainer():
 
         model.eval()
         pred_dict = {}
-        all_start_logits = []
-        all_end_logits = []
+        all_start_logits_regular = []
+        all_end_logits_regular = []
+        all_start_logits_meta = []
+        all_end_logits_meta = []
         with torch.no_grad(), \
                 tqdm(total=len(data_loader.dataset)) as progress_bar:
             for batch in data_loader:
@@ -168,21 +170,43 @@ class Trainer():
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 batch_size = len(input_ids)
-                outputs = model(input_ids, attention_mask=attention_mask)
+                # Outputs from regular forward
+                outputs_regular = model(input_ids, attention_mask=attention_mask)
+                # Outputs from metalearning layer
+                outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask)
                 # Forward
-                start_logits, end_logits = outputs.start_logits, outputs.end_logits
+                start_logits_regular, end_logits_regular = outputs_regular.start_logits, outputs_regular.end_logits
+                start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
                 # TODO: compute loss
 
-                all_start_logits.append(start_logits)
-                all_end_logits.append(end_logits)
+                all_start_logits_regular.append(start_logits_regular)
+                all_end_logits_regular.append(end_logits_regular)
+                all_start_logits_meta.append(start_logits_meta)
+                all_end_logits_meta.append(end_logits_meta)
                 progress_bar.update(batch_size)
 
         # Get F1 and EM scores
-        start_logits = torch.cat(all_start_logits).cpu().numpy()
-        end_logits = torch.cat(all_end_logits).cpu().numpy()
-        preds = util.postprocess_qa_predictions(data_dict,
+        start_logits = torch.cat(all_start_logits_regular).cpu().numpy()
+        end_logits = torch.cat(all_end_logits_regular).cpu().numpy()
+        preds_regular, confidence_regular = util.postprocess_qa_predictions(data_dict,
                                                  data_loader.dataset.encodings,
                                                  (start_logits, end_logits))
+
+        start_logits = torch.cat(all_start_logits_meta).cpu().numpy()
+        end_logits = torch.cat(all_end_logits_meta).cpu().numpy()
+        preds_meta, confidence_meta = util.postprocess_qa_predictions(data_dict,
+                                                data_loader.dataset.encodings,
+                                                (start_logits, end_logits))
+        # Pick between preds_regular and preds_meta based on metric of confidence
+        preds = {}
+        for id in preds_regular:
+            c_r = confidence_regular[id]
+            c_m = confidence_meta[id]
+            if c_r > c_m:
+                preds[id] = preds_regular[id]
+            else:
+                preds[id] = preds_meta[id]
+
         if split == 'validation':
             results = util.eval_dicts(data_dict, preds)
             results_list = [('F1', results['F1']),
@@ -196,17 +220,17 @@ class Trainer():
         return results
 
     def inner_loop(self, qa, model: DistilBertForQuestionAnswering):
-        alpha = 0.4     # Learning rate, default from MAML code
-        out = model(**qa)
+        alpha = 0.3     # Learning rate, default from MAML code
+        out = model.forward_meta(**qa)
         loss = out[0]
-        params = model.qa_outputs
-        grad = torch.autograd.grad(loss, model.qa_outputs, create_graph=True)[0]
+        params = model.parallel.weight
+        grad = torch.autograd.grad(loss, params, create_graph=True)[0]
         params -= alpha*grad
         return params
 
     def outer_step(self, task_batch, model: DistilBertForQuestionAnswering):
         outer_loss_batch = []
-        qa_outputs_weight = copy.copy(model.qa_outputs.weight)
+        parallel_weight_orig = copy.copy(model.parallel.weight)
         for task in task_batch:
             qa_support, qa_query = task
             qa_support = qa_support.to(self.device)
@@ -216,12 +240,12 @@ class Trainer():
             #                 start_positions=start_positions,
             #                 end_positions=end_positions)
             # Overwrite the model linear weights with params, assume inner_loop returns the weights of last layer
-            model.qa_outputs.weight = params
-            out = model(**qa_query)
+            model.parallel.weight = params
+            out = model.forward_meta(**qa_query)
             loss = out[0]
             outer_loss_batch.append(loss)
         outer_loss = torch.mean(torch.stack(outer_loss_batch))
-        model.qa_outputs.weight = qa_outputs_weight
+        model.parallel.weight = parallel_weight_orig
         return outer_loss
 
     def train(self, model: DistilBertForQuestionAnswering, train_dataloader, eval_dataloader, val_dict):
@@ -280,29 +304,31 @@ class Trainer():
         best_scores = {'F1': -1.0, 'EM': -1.0}
         tbx = SummaryWriter(self.save_dir)
 
-        # Freeze all layers except the last linear layer
+        # Freeze all layers except the "parallel" layer for metalearning
         # print(next(model.modules()))
         # model.distilbert
         model.distilbert.requires_grad_(False)
+        model.qa_outputs.requires_grad_(False)
         # Check
         # model.distilbert.transformer.layer[0].attention.q_lin.weight.requires_grad
 
         for epoch_num in range(self.num_epochs):
             self.log.info(f'Epoch: {epoch_num}')
             with torch.enable_grad(), tqdm(total=len(train_dataloader.dataset)) as progress_bar:
-                # for batch in train_dataloader:
                 for task_batch in train_dataloader:
                     optim.zero_grad()
                     model.train()
-                    # input_ids = batch['input_ids'].to(device)
-                    # attention_mask = batch['attention_mask'].to(device)
-                    # start_positions = batch['start_positions'].to(device)
-                    # end_positions = batch['end_positions'].to(device)
-                    # outputs = model(input_ids, attention_mask=attention_mask,
-                    #                 start_positions=start_positions,
-                    #                 end_positions=end_positions)
-                    # loss = outputs[0]
-                    # loss.backward()
+# from parallel_model import ParallelModel
+# m = ParallelModel.from_pretrained("distilbert-base-uncased")
+# batch = task_batch
+# input_ids = batch['input_ids'].to(device)
+# attention_mask = batch['attention_mask'].to(device)
+# start_positions = batch['start_positions'].to(device)
+# end_positions = batch['end_positions'].to(device)
+# outputs = m.forward_p(input_ids, attention_mask=attention_mask, start_positions=start_positions, end_positions=end_positions)
+# loss = outputs[0]
+# loss.backward()
+                    import pdb; pdb.set_trace()
                     loss = self.outer_step(task_batch, model)
                     loss.backward()
                     optim.step()

@@ -416,8 +416,9 @@ def postprocess_qa_predictions(examples, features, predictions,
 
         best_non_null_pred = predictions[i]
         all_predictions[example["id"]] = best_non_null_pred["text"]
+        prediction_confidence = best_non_null_pred["start_logit"]*best_non_null_pred["end_logit"]
 
-    return all_predictions
+    return all_predictions, prediction_confidence
 
 
 
