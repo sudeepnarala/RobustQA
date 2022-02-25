@@ -2,6 +2,7 @@ import argparse
 import copy
 import json
 import os
+import pdb
 from collections import OrderedDict
 import torch
 import torch.nn.functional as F
@@ -153,10 +154,26 @@ class Trainer():
             os.makedirs(self.path)
         self.device = args.device
         self.args = args
+        self.parallel_weights = torch.nn.init.xavier_uniform_(
+            torch.empty(
+                2,
+                768,
+                requires_grad=True,
+                device=self.device
+            )
+        )
 
     def save(self, model):
         model.save_pretrained(self.path)
         torch.save(model.state_dict(), os.path.join(self.args.save_dir, "save_dict"))
+        torch.save(self.parallel_weights, os.path.join(self.args.save_dir, "parallel_weights"))
+
+    def g(self):
+        t = torch.cuda.get_device_properties(0).total_memory
+        r = torch.cuda.memory_reserved(0)
+        a = torch.cuda.memory_allocated(0)
+        f = r - a  # free inside reserved
+        print(t, r, a, f)
 
     # There is a difference between meta-learning evaluation and final prediction evaluation
     # We won't really do eval during training for meta-learning
@@ -166,21 +183,26 @@ class Trainer():
 
         model.eval()
         pred_dict = {}
-        all_start_logits_regular = []
-        all_end_logits_regular = []
-        all_start_logits_meta = []
-        all_end_logits_meta = []
-        start_regular = []
+        start_regular = []  # 1 entry per task
         end_regular = []
         start_meta = []
         end_meta = []
         preds = {}
-        meta_model = False
+        meta_model = True
+        regular_use = 0
+        meta_use = 0
+        import pdb
+        pdb.set_trace()
         # with torch.no_grad(), \
         with tqdm(total=len(data_loader.dataset)) as progress_bar:
             for task_batch in data_loader:
-                # Change "parallel" weights for each task based on support
                 for task in task_batch:
+                    # Change "parallel" weights for each task based on support
+                    # Reset these for every task
+                    all_start_logits_regular = []
+                    all_end_logits_regular = []
+                    all_start_logits_meta = []
+                    all_end_logits_meta = []
                     print("task being done!")
                     batch = task["support"]
                     for key in batch:
@@ -188,19 +210,23 @@ class Trainer():
                         batch[key] = batch[key].squeeze(0)
                     # Adapt theta for meta-learning
                     # Change weights based on forward from "support"
+                    task_weight = copy.copy(self.parallel_weights)
+                    a_t = torch.optim.Adam([task_weight], lr=0.01)
                     if meta_model:
+
                         for i in range(batch["input_ids"].shape[0] // 10+1):
+                            a_t.zero_grad()
                             minibatch = {}
                             for key in batch:
                                 minibatch[key] = batch[key][i*10:i*10+10]
-                            alpha = 0.4
-                            weights = torch.nn.Parameter(torch.clone(model.parallel.weight))
-                            out = model.forward_meta(**minibatch, weights=weights)
+                            # alpha = 0.1
+                            # Are the weights even changing
+                            out = model.forward_meta(**minibatch, weights=task_weight)
                             loss = out[0]
-                            grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
-                            meta_weight = weights - alpha*grad
-                    import pdb
-                    pdb.set_trace()
+                            loss.backward()
+                            a_t.step()
+                            # grad = torch.autograd.grad(loss, task_weight, create_graph=True)[0]
+                            # task_weight = task_weight - alpha*grad
                     batch = task["query"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
@@ -214,9 +240,9 @@ class Trainer():
                             # Outputs from regular forward
                             outputs_regular = model(input_ids, attention_mask=attention_mask)
                             # Outputs from metalearning layer
+                            # TODO FIX
                             if meta_model:
-                                meta_weight = torch.nn.Parameter(meta_weight)
-                                outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask, weights=meta_weight)
+                                outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask, weights=task_weight)
                         # Forward
                         start_logits_regular, end_logits_regular = outputs_regular.start_logits, outputs_regular.end_logits
                         if meta_model:
@@ -242,14 +268,6 @@ class Trainer():
             start_logits = start_regular[i].cpu().detach().numpy()
             end_logits = end_regular[i].cpu().detach().numpy()
 
-            # merged_encodings = {key: data_loader.dataset.test_encodings[0][key] for key in data_loader.dataset.test_encodings[0].keys()}
-            # for key in data_loader.dataset.test_encodings[0].keys():
-            #     for i in range(1, len(data_loader.dataset.test_encodings)):
-            #         merged_encodings[key] += data_loader.dataset.test_encodings[i][key]
-            # import pdb
-            # pdb.set_trace()
-            # import pdb
-            # pdb.set_trace()
             preds_regular, confidence_regular = util.postprocess_qa_predictions(data_dict[i],
                                                      data_loader.dataset.test_encodings[i],
                                                      (start_logits, end_logits))
@@ -266,39 +284,44 @@ class Trainer():
                     preds[id] = preds_regular[id]
                     continue
                 c_m = confidence_meta[id]
-                if True and c_r > c_m:
+                if c_r > c_m:
+                    regular_use += 1
                     preds[id] = preds_regular[id]
                 else:
+                    meta_use += 1
                     preds[id] = preds_meta[id]
 
         # if split == 'validation':
-        if split == 'ajkfa':
-            results = util.eval_dicts(data_dict, preds)
+        if split == 'validation':
+            # Combine data_dict
+            combined_data_dict = data_dict[0]
+            for i in range(1, len(data_dict)):
+                util.merge(combined_data_dict, data_dict[i])
+            results = util.eval_dicts(combined_data_dict, preds)
             results_list = [('F1', results['F1']),
                             ('EM', results['EM'])]
         else:
             results_list = [('F1', -1.0),
                             ('EM', -1.0)]
         results = OrderedDict(results_list)
+        print("Regular used {}, meta used {}".format(regular_use, meta_use))
         if return_preds:
             return preds, results
         return results
 
     def inner_loop(self, qa, model: DistilBertForQuestionAnswering):
-        alpha = 0.3     # Learning rate, default from MAML code
-        params = torch.clone(model.parallel.weight)
-        params = torch.nn.Parameter(params)
-        params = params.to(self.device)
+        alpha = 0.1     # Learning rate, default from MAML code
+        params = torch.clone(self.parallel_weights)
+        # params = params.to(self.device)
         out = model.forward_meta(**qa, weights=params)
         loss = out[0]
         grad = torch.autograd.grad(loss, params, create_graph=True)[0]
-        params.requires_grad = False
-        params -= alpha*grad
-        return params
+        # grad = model.grad_dropout(grad)
+        # params.requires_grad = False
+        return params - alpha*grad
 
     def outer_step(self, task_batch, model: DistilBertForQuestionAnswering):
         outer_loss_batch = []
-        parallel_weight_orig = copy.copy(model.parallel.weight)
         for task in task_batch:
             qa_support, qa_query = task["support"], task["query"]
             for key in qa_support:
@@ -312,18 +335,16 @@ class Trainer():
             #                 start_positions=start_positions,
             #                 end_positions=end_positions)
             # Overwrite the model linear weights with params, assume inner_loop returns the weights of last layer
-            model.parallel.weight = torch.nn.Parameter(params)
-            out = model.forward_meta(**qa_query)
+            out = model.forward_meta(**qa_query, weights=params)
             loss = out[0]
             outer_loss_batch.append(loss)
         outer_loss = torch.mean(torch.stack(outer_loss_batch))
-        model.parallel.weight = parallel_weight_orig
         return outer_loss
 
     def train(self, model: DistilBertForQuestionAnswering, train_dataloader):
         device = self.device
         model.to(device)
-        optim = AdamW(model.parameters(), lr=self.lr)
+        optim = AdamW([self.parallel_weights], lr=self.lr)
         global_idx = 0
         best_scores = {'F1': -1.0, 'EM': -1.0}
         tbx = SummaryWriter(self.save_dir)
@@ -335,6 +356,12 @@ class Trainer():
         model.qa_outputs.requires_grad_(False)
         # Check
         # model.distilbert.transformer.layer[0].attention.q_lin.weight.requires_grad
+
+        tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+        eval_dataset, eval_dict = get_dataset(self.args, "duorc,race,relation_extraction", "datasets/oodomain_train",
+                                              tokenizer,
+                                              "validation", test_datasets=self.args.eval_datasets,
+                                              eval_dir=self.args.eval_dir)
 
         for epoch_num in range(self.num_epochs):
             # preds, curr_score = self.evaluate(model, eval_dataloader, val_dict, return_preds=True)
@@ -348,48 +375,42 @@ class Trainer():
                         print("{} / {}".format(i+1, len(train_dataloader)))
                     optim.zero_grad()
                     model.train()
-# from parallel_model import ParallelModel
-# m = ParallelModel.from_pretrained("distilbert-base-uncased")
-# batch = task_batch
-# input_ids = batch['input_ids'].to(device)
-# attention_mask = batch['attention_mask'].to(device)
-# start_positions = batch['start_positions'].to(device)
-# end_positions = batch['end_positions'].to(device)
-# outputs = m.forward_p(input_ids, attention_mask=attention_mask, start_positions=start_positions, end_positions=end_positions)
-# loss = outputs[0]
-# loss.backward()
-#                     model.parallel.requires_grad_(False)
                     loss = self.outer_step(task_batch, model)
                     loss.backward()
+                    # assert model.parallel.weight.requires_grad == True
+
+
                     optim.step()
                     progress_bar.update(len(task_batch[0]["support"]["input_ids"]))
                     progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
 
-            self.save(model)
-        return 0
-
-                    # progress_bar.update(len(input_ids))
-                    # progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
-                    # tbx.add_scalar('train/NLL', loss.item(), global_idx)
-                    # if (global_idx % self.eval_every) == 0:
-                    #     self.log.info(f'Evaluating at step {global_idx}...')
-                    #     preds, curr_score = self.evaluate(model, eval_dataloader, val_dict, return_preds=True)
-                    #     results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in curr_score.items())
-                    #     self.log.info('Visualizing in TensorBoard...')
-                    #     for k, v in curr_score.items():
-                    #         tbx.add_scalar(f'val/{k}', v, global_idx)
-                    #     self.log.info(f'Eval {results_str}')
-                    #     if self.visualize_predictions:
-                    #         util.visualize(tbx,
-                    #                        pred_dict=preds,
-                    #                        gold_dict=val_dict,
-                    #                        step=global_idx,
-                    #                        split='val',
-                    #                        num_visuals=self.num_visuals)
-                    #     if curr_score['F1'] >= best_scores['F1']:
-                    #         best_scores = curr_score
-                    #         self.save(model)
-                    # global_idx += 1
+                    # Let's get val working
+                    progress_bar.update(len(task_batch[0]["query"]["input_ids"]))
+                    progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
+                    tbx.add_scalar('train/NLL', loss.item(), global_idx)
+                    if (global_idx % self.eval_every) == 0:
+                        self.log.info(f'Evaluating at step {global_idx}...')
+                        eval_dataloader = DataLoader(eval_dataset,
+                                                 batch_size=1,
+                                                 sampler=SequentialSampler(eval_dataset))
+                        preds, curr_score = self.evaluate(model, eval_dataloader, eval_dict, return_preds=True)
+                        results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in curr_score.items())
+                        self.log.info('Visualizing in TensorBoard...')
+                        for k, v in curr_score.items():
+                            tbx.add_scalar(f'val/{k}', v, global_idx)
+                        self.log.info(f'Eval {results_str}')
+                        if self.visualize_predictions:
+                            util.visualize(tbx,
+                                           pred_dict=preds,
+                                           gold_dict=eval_dict,
+                                           step=global_idx,
+                                           split='val',
+                                           num_visuals=self.num_visuals)
+                        if curr_score['F1'] >= best_scores['F1']:
+                            best_scores = curr_score
+                            self.save(model)
+                    global_idx += 1
+        return best_scores
         # return best_scores
 
 def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=None, eval_dir=None):
@@ -471,8 +492,13 @@ def main():
         # model = ParallelModel.from_pretrained(checkpoint_path, init_parallel=False)     # Should load linear weights from training
         # model.to(args.device)
         # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
-        model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+        model = ParallelModel.from_pretrained(checkpoint_path)
+        model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
         model.to(args.device)
+        loaded_parallel_weights = torch.load(os.path.join(args.save_dir, "parallel_weights"))
+        trainer.parallel_weights = loaded_parallel_weights
+        import pdb
+        pdb.set_trace()
         eval_dataset, eval_dict = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, split_name, test_datasets=args.eval_datasets, eval_dir=args.eval_dir)
         eval_loader = DataLoader(eval_dataset,
                                  batch_size=1,

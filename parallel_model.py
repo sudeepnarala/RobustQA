@@ -1,6 +1,7 @@
 from transformers import DistilBertForQuestionAnswering
 from transformers.modeling_outputs import QuestionAnsweringModelOutput
 import torch
+import torch.nn.functional as F
 
 class ParallelModel(DistilBertForQuestionAnswering):
     @classmethod
@@ -11,12 +12,11 @@ class ParallelModel(DistilBertForQuestionAnswering):
                 init_parallel = True
             del kwargs["init_parallel"]
         s = super(ParallelModel, cls).from_pretrained(*args, **kwargs)
-        s.parallel = torch.nn.Linear(768, 2, bias=True)
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        s.parallel = s.parallel.to(device)
-        if init_parallel:
-            torch.nn.init.xavier_normal_(s.parallel.weight)
+        # s.parallel = torch.nn.Linear(768, 2, bias=True)
+        # device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        # s.parallel = s.parallel.to(device)
         s.dropout2 = torch.nn.Dropout(p=0.1, inplace=False)
+        s.grad_dropout = torch.nn.Dropout(p=0.4)
         # s.forward = cls.forward
         return s
 
@@ -58,14 +58,14 @@ class ParallelModel(DistilBertForQuestionAnswering):
         hidden_states = distilbert_output[0]  # (bs, max_query_len, dim)
 
         hidden_states = self.dropout(hidden_states)  # (bs, max_query_len, dim)
-        if weights is not None:
-            linear_layer = torch.nn.Linear(768, 2)
-            linear_layer.weight = weights
-        else:
-            linear_layer = self.parallel
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        linear_layer = linear_layer.to(device)
-        logits = linear_layer(hidden_states)  # (bs, max_query_len, 2)
+        # if weights is not None:
+        #     linear_layer = torch.nn.Linear(768, 2)
+        #     linear_layer.weight = weights
+        # else:
+        #     linear_layer = self.parallel
+        assert weights is not None
+
+        logits = F.linear(input=hidden_states, weight=weights, bias=None)  # (bs, max_query_len, 2)
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
         end_logits = end_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
