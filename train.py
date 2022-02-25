@@ -125,7 +125,7 @@ def prepare_train_data(dataset_dict, tokenizer):
 def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
     #TODO: cache this if possible
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
-    if os.path.exists(cache_path) and not args.recompute_features:
+    if False and os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
@@ -152,9 +152,11 @@ class Trainer():
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         self.device = args.device
+        self.args = args
 
     def save(self, model):
         model.save_pretrained(self.path)
+        torch.save(model.state_dict(), os.path.join(self.args.save_dir, "save_dict"))
 
     # There is a difference between meta-learning evaluation and final prediction evaluation
     # We won't really do eval during training for meta-learning
@@ -168,72 +170,109 @@ class Trainer():
         all_end_logits_regular = []
         all_start_logits_meta = []
         all_end_logits_meta = []
+        start_regular = []
+        end_regular = []
+        start_meta = []
+        end_meta = []
+        preds = {}
+        meta_model = False
         # with torch.no_grad(), \
         with tqdm(total=len(data_loader.dataset)) as progress_bar:
             for task_batch in data_loader:
                 # Change "parallel" weights for each task based on support
                 for task in task_batch:
+                    print("task being done!")
                     batch = task["support"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
                         batch[key] = batch[key].squeeze(0)
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    batch_size = len(input_ids)
                     # Adapt theta for meta-learning
                     # Change weights based on forward from "support"
-                    alpha = 0.4
-                    weights = torch.nn.Parameter(torch.clone(model.parallel.weight))
-                    out = model.forward_meta(**batch, weights=weights)
-                    loss = out[0]
-                    grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
-                    meta_weight = weights - alpha*grad
-
+                    if meta_model:
+                        for i in range(batch["input_ids"].shape[0] // 10+1):
+                            minibatch = {}
+                            for key in batch:
+                                minibatch[key] = batch[key][i*10:i*10+10]
+                            alpha = 0.4
+                            weights = torch.nn.Parameter(torch.clone(model.parallel.weight))
+                            out = model.forward_meta(**minibatch, weights=weights)
+                            loss = out[0]
+                            grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
+                            meta_weight = weights - alpha*grad
+                    import pdb
+                    pdb.set_trace()
                     batch = task["query"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
                         batch[key] = batch[key].squeeze(0)
-                    for i in range(batch["input_ids"].shape[0]//10):
+                        batch[key] = batch[key]
+
+                    for i in range(batch["input_ids"].shape[0]//10+1):
                         input_ids = batch["input_ids"][10*i:10*i+10]
                         attention_mask = batch["attention_mask"][10 * i:10 * i + 10]
-                        # Outputs from regular forward
-                        outputs_regular = model(input_ids, attention_mask=attention_mask)
-                        # Outputs from metalearning layer
-                        outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask, weights=meta_weight)
+                        with torch.no_grad():
+                            # Outputs from regular forward
+                            outputs_regular = model(input_ids, attention_mask=attention_mask)
+                            # Outputs from metalearning layer
+                            if meta_model:
+                                meta_weight = torch.nn.Parameter(meta_weight)
+                                outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask, weights=meta_weight)
                         # Forward
                         start_logits_regular, end_logits_regular = outputs_regular.start_logits, outputs_regular.end_logits
-                        start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
+                        if meta_model:
+                            start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
                         # TODO: compute loss
 
                         all_start_logits_regular.append(start_logits_regular)
                         all_end_logits_regular.append(end_logits_regular)
-                        all_start_logits_meta.append(start_logits_meta)
-                        all_end_logits_meta.append(end_logits_meta)
+                        if meta_model:
+                            all_start_logits_meta.append(start_logits_meta)
+                            all_end_logits_meta.append(end_logits_meta)
+
+                    start_regular.append(torch.cat(all_start_logits_regular))
+                    end_regular.append(torch.cat(all_end_logits_regular))
+                    if meta_model:
+                        start_meta.append(torch.cat(all_start_logits_meta))
+                        end_meta.append(torch.cat(all_end_logits_meta))
+
                     # progress_bar.update(batch_size)
 
-        # Get F1 and EM scores
-        start_logits = torch.cat(all_start_logits_regular).cpu().numpy()
-        end_logits = torch.cat(all_end_logits_regular).cpu().numpy()
-        preds_regular, confidence_regular = util.postprocess_qa_predictions(data_dict,
-                                                 data_loader.dataset.encodings,
-                                                 (start_logits, end_logits))
+        for i in range(len(data_loader.dataset.test_encodings)):
+            # Get F1 and EM scores
+            start_logits = start_regular[i].cpu().detach().numpy()
+            end_logits = end_regular[i].cpu().detach().numpy()
 
-        start_logits = torch.cat(all_start_logits_meta).cpu().numpy()
-        end_logits = torch.cat(all_end_logits_meta).cpu().numpy()
-        preds_meta, confidence_meta = util.postprocess_qa_predictions(data_dict,
-                                                data_loader.dataset.encodings,
-                                                (start_logits, end_logits))
-        # Pick between preds_regular and preds_meta based on metric of confidence
-        preds = {}
-        for id in preds_regular:
-            c_r = confidence_regular[id]
-            c_m = confidence_meta[id]
-            if c_r > c_m:
-                preds[id] = preds_regular[id]
-            else:
-                preds[id] = preds_meta[id]
+            # merged_encodings = {key: data_loader.dataset.test_encodings[0][key] for key in data_loader.dataset.test_encodings[0].keys()}
+            # for key in data_loader.dataset.test_encodings[0].keys():
+            #     for i in range(1, len(data_loader.dataset.test_encodings)):
+            #         merged_encodings[key] += data_loader.dataset.test_encodings[i][key]
+            # import pdb
+            # pdb.set_trace()
+            # import pdb
+            # pdb.set_trace()
+            preds_regular, confidence_regular = util.postprocess_qa_predictions(data_dict[i],
+                                                     data_loader.dataset.test_encodings[i],
+                                                     (start_logits, end_logits))
+            if meta_model:
+                start_logits = start_meta[i].cpu().numpy()
+                end_logits = end_meta[i].cpu().numpy()
+                preds_meta, confidence_meta = util.postprocess_qa_predictions(data_dict[i],
+                                                        data_loader.dataset.test_encodings[i],
+                                                        (start_logits, end_logits))
+            # Pick between preds_regular and preds_meta based on metric of confidence
+            for id in preds_regular:
+                c_r = confidence_regular[id]
+                if not meta_model:
+                    preds[id] = preds_regular[id]
+                    continue
+                c_m = confidence_meta[id]
+                if True and c_r > c_m:
+                    preds[id] = preds_regular[id]
+                else:
+                    preds[id] = preds_meta[id]
 
-        if split == 'validation':
+        # if split == 'validation':
+        if split == 'ajkfa':
             results = util.eval_dicts(data_dict, preds)
             results_list = [('F1', results['F1']),
                             ('EM', results['EM'])]
@@ -249,6 +288,7 @@ class Trainer():
         alpha = 0.3     # Learning rate, default from MAML code
         params = torch.clone(model.parallel.weight)
         params = torch.nn.Parameter(params)
+        params = params.to(self.device)
         out = model.forward_meta(**qa, weights=params)
         loss = out[0]
         grad = torch.autograd.grad(loss, params, create_graph=True)[0]
@@ -260,7 +300,6 @@ class Trainer():
         outer_loss_batch = []
         parallel_weight_orig = copy.copy(model.parallel.weight)
         for task in task_batch:
-            print("FINISHED 1 TASK")
             qa_support, qa_query = task["support"], task["query"]
             for key in qa_support:
                 qa_support[key] = qa_support[key].to(self.device)
@@ -303,7 +342,10 @@ class Trainer():
             # pdb.set_trace()
             self.log.info(f'Epoch: {epoch_num}')
             with torch.enable_grad(), tqdm(total=len(train_dataloader.dataset)) as progress_bar:
-                for task_batch in train_dataloader:
+                print(len(train_dataloader))
+                for i, task_batch in enumerate(train_dataloader):
+                    if i % 25 == 0:
+                        print("{} / {}".format(i+1, len(train_dataloader)))
                     optim.zero_grad()
                     model.train()
 # from parallel_model import ParallelModel
@@ -320,6 +362,8 @@ class Trainer():
                     loss = self.outer_step(task_batch, model)
                     loss.backward()
                     optim.step()
+                    progress_bar.update(len(task_batch[0]["support"]["input_ids"]))
+                    progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
 
             self.save(model)
         return 0
@@ -357,7 +401,8 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=N
     """
     datasets = datasets.split(',')
     dataset_name=''
-    dataset_dict = {}
+    # Only used for test
+    dataset_dict = []
     all_data_encodings = []
     # Instead of merging datasets, just split them
     for dataset in datasets:
@@ -365,12 +410,12 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=N
         current_dataset_dict = util.read_squad(f'{data_dir}/{dataset}')
         data_encodings = read_and_process(args, tokenizer, current_dataset_dict, data_dir, dataset_name, "train")
         all_data_encodings.append(data_encodings)
-        dataset_dict = util.merge(dataset_dict, current_dataset_dict)
+        # dataset_dict = util.merge(dataset_dict, current_dataset_dict)
     # Means we are in test mode!
     if test_datasets is not None:
         test_datasets = test_datasets.split(',')
         dataset_name = ''
-        dataset_dict = {}
+        # dataset_dict = {}
         test_data_encodings = []
         # Instead of merging datasets, just split them
         for dataset in test_datasets:
@@ -378,7 +423,8 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=N
             current_dataset_dict = util.read_squad(f'{eval_dir}/{dataset}')
             data_encodings = read_and_process(args, tokenizer, current_dataset_dict, data_dir, dataset_name, split_name)
             test_data_encodings.append(data_encodings)
-            dataset_dict = util.merge(dataset_dict, current_dataset_dict)
+            # dataset_dict = util.merge(dataset_dict, current_dataset_dict)
+            dataset_dict.append(current_dataset_dict)
         return util.QADatasets(all_data_encodings, num_support=args.num_support, num_query=args.num_query, test_encodings=test_data_encodings), dataset_dict
 
     return util.QADatasets(all_data_encodings, num_support=args.num_support, num_query=args.num_query), dataset_dict
@@ -414,6 +460,7 @@ def main():
         #                         batch_size=args.batch_size,
         #                         sampler=SequentialSampler(val_dataset))
         best_scores = trainer.train(model, train_loader)
+        trainer.save(model)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
@@ -421,7 +468,10 @@ def main():
         trainer = Trainer(args, log)
         checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
         # model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
-        model = ParallelModel.from_pretrained(checkpoint_path, init_parallel=False)     # Should load linear weights from training
+        # model = ParallelModel.from_pretrained(checkpoint_path, init_parallel=False)     # Should load linear weights from training
+        # model.to(args.device)
+        # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
+        model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
         model.to(args.device)
         eval_dataset, eval_dict = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, split_name, test_datasets=args.eval_datasets, eval_dir=args.eval_dir)
         eval_loader = DataLoader(eval_dataset,

@@ -190,6 +190,7 @@ class QADataset(Dataset):
         return len(self.encodings['input_ids'])
 
 class QADatasets(Dataset):
+    BATCH_SIZE_EVAL = 10
     def __init__(self, encodings, num_support, num_query, test_encodings=None):
         """
         encodings: List of size num_datasets with data_encodings for each dataset
@@ -216,6 +217,7 @@ class QADatasets(Dataset):
         if not self.test:
             self.num_possible_supports = min(map(lambda x: len(x["input_ids"]), self.encodings)) // (self.num_query + self.num_support)
         else:
+            # self.num_possible_supports = self.encodings // self.BATCH_SIZE_EVAL + self.test_encodings // self.BATCH_SIZE_EVAL
             self.num_possible_supports = 1
         # Split between support and query
         if not self.test:
@@ -394,6 +396,7 @@ def postprocess_qa_predictions(examples, features, predictions,
 
     # The dictionaries we have to fill.
     all_predictions = OrderedDict()
+    prediction_confidence = OrderedDict()
 
     # Let's loop over all the examples!
     for example_index in tqdm(range(len(examples['id']))):
@@ -489,7 +492,7 @@ def postprocess_qa_predictions(examples, features, predictions,
 
         best_non_null_pred = predictions[i]
         all_predictions[example["id"]] = best_non_null_pred["text"]
-        prediction_confidence = best_non_null_pred["start_logit"]*best_non_null_pred["end_logit"]
+        prediction_confidence[example["id"]] = best_non_null_pred["start_logit"]+best_non_null_pred["end_logit"]
 
     return all_predictions, prediction_confidence
 
