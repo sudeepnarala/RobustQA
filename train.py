@@ -185,14 +185,8 @@ class Trainer():
         pred_dict = {}
         start_regular = []  # 1 entry per task
         end_regular = []
-        start_meta = []
-        end_meta = []
         preds = {}
-        meta_model = True
-        regular_use = 0
-        meta_use = 0
-        import pdb
-        pdb.set_trace()
+
         # with torch.no_grad(), \
         with tqdm(total=len(data_loader.dataset)) as progress_bar:
             for task_batch in data_loader:
@@ -201,38 +195,31 @@ class Trainer():
                     # Reset these for every task
                     all_start_logits_regular = []
                     all_end_logits_regular = []
-                    all_start_logits_meta = []
-                    all_end_logits_meta = []
-                    print("task being done!")
+                    checkpoint_path = os.path.join(self.args.save_dir, 'checkpoint')
+                    # Reload model for each task
+                    model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
                     batch = task["support"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
                         batch[key] = batch[key].squeeze(0)
+                    a_t = torch.optim.Adam(model.parameters(), lr=0.001)
+                    # Fine tune on train
+                    for i in range(batch["input_ids"].shape[0] // 10 + 1):
+                        minibatch = {key: batch[key][10*i:10*i+10] for key in batch}
+                        a_t.zero_grad()
+                        out = model(**minibatch)
+                        loss = out[0]
+                        loss.backward()
+                        a_t.step()
+
                     # Adapt theta for meta-learning
                     # Change weights based on forward from "support"
-                    task_weight = copy.copy(self.parallel_weights)
-                    a_t = torch.optim.Adam([task_weight], lr=0.01)
-                    if meta_model:
-
-                        for i in range(batch["input_ids"].shape[0] // 10+1):
-                            a_t.zero_grad()
-                            minibatch = {}
-                            for key in batch:
-                                minibatch[key] = batch[key][i*10:i*10+10]
-                            # alpha = 0.1
-                            # Are the weights even changing
-                            out = model.forward_meta(**minibatch, weights=task_weight)
-                            loss = out[0]
-                            loss.backward()
-                            a_t.step()
-                            # grad = torch.autograd.grad(loss, task_weight, create_graph=True)[0]
-                            # task_weight = task_weight - alpha*grad
                     batch = task["query"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
                         batch[key] = batch[key].squeeze(0)
                         batch[key] = batch[key]
-
+                    # Make predictions on val
                     for i in range(batch["input_ids"].shape[0]//10+1):
                         input_ids = batch["input_ids"][10*i:10*i+10]
                         attention_mask = batch["attention_mask"][10 * i:10 * i + 10]
@@ -240,26 +227,16 @@ class Trainer():
                             # Outputs from regular forward
                             outputs_regular = model(input_ids, attention_mask=attention_mask)
                             # Outputs from metalearning layer
-                            # TODO FIX
-                            if meta_model:
-                                outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask, weights=task_weight)
+
                         # Forward
                         start_logits_regular, end_logits_regular = outputs_regular.start_logits, outputs_regular.end_logits
-                        if meta_model:
-                            start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
                         # TODO: compute loss
 
                         all_start_logits_regular.append(start_logits_regular)
                         all_end_logits_regular.append(end_logits_regular)
-                        if meta_model:
-                            all_start_logits_meta.append(start_logits_meta)
-                            all_end_logits_meta.append(end_logits_meta)
 
                     start_regular.append(torch.cat(all_start_logits_regular))
                     end_regular.append(torch.cat(all_end_logits_regular))
-                    if meta_model:
-                        start_meta.append(torch.cat(all_start_logits_meta))
-                        end_meta.append(torch.cat(all_end_logits_meta))
 
                     # progress_bar.update(batch_size)
 
@@ -271,25 +248,9 @@ class Trainer():
             preds_regular, confidence_regular = util.postprocess_qa_predictions(data_dict[i],
                                                      data_loader.dataset.test_encodings[i],
                                                      (start_logits, end_logits))
-            if meta_model:
-                start_logits = start_meta[i].cpu().numpy()
-                end_logits = end_meta[i].cpu().numpy()
-                preds_meta, confidence_meta = util.postprocess_qa_predictions(data_dict[i],
-                                                        data_loader.dataset.test_encodings[i],
-                                                        (start_logits, end_logits))
             # Pick between preds_regular and preds_meta based on metric of confidence
             for id in preds_regular:
-                c_r = confidence_regular[id]
-                if not meta_model:
-                    preds[id] = preds_regular[id]
-                    continue
-                c_m = confidence_meta[id]
-                if c_r > c_m:
-                    regular_use += 1
-                    preds[id] = preds_regular[id]
-                else:
-                    meta_use += 1
-                    preds[id] = preds_meta[id]
+                preds[id] = preds_regular[id]
 
         # if split == 'validation':
         if split == 'validation':
@@ -304,7 +265,6 @@ class Trainer():
             results_list = [('F1', -1.0),
                             ('EM', -1.0)]
         results = OrderedDict(results_list)
-        print("Regular used {}, meta used {}".format(regular_use, meta_use))
         if return_preds:
             return preds, results
         return results
