@@ -205,13 +205,14 @@ class Trainer():
                         batch[key] = batch[key].squeeze(0)
                     a_t = torch.optim.Adam(model.parameters(), lr=self.args.lr)
                     # Fine tune on train
-                    for i in range(batch["input_ids"].shape[0] // 10 + 1):
-                        minibatch = {key: batch[key][10*i:10*i+10] for key in batch}
-                        a_t.zero_grad()
-                        out = model(**minibatch)
-                        loss = out[0]
-                        loss.backward()
-                        a_t.step()
+                    for epoch in range(5):
+                        for i in range(batch["input_ids"].shape[0] // 10 + 1):
+                            minibatch = {key: batch[key][10*i:10*i+10] for key in batch}
+                            a_t.zero_grad()
+                            out = model(**minibatch)
+                            loss = out[0]
+                            loss.backward()
+                            a_t.step()
 
                     # Adapt theta for meta-learning
                     # Change weights based on forward from "support"
