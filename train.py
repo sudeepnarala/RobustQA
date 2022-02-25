@@ -198,6 +198,7 @@ class Trainer():
                     checkpoint_path = os.path.join(self.args.save_dir, 'checkpoint')
                     # Reload model for each task
                     model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+                    model.to(self.device)
                     batch = task["support"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
@@ -457,8 +458,6 @@ def main():
         # model.to(args.device)
         # loaded_parallel_weights = torch.load(os.path.join(args.save_dir, "parallel_weights"))
         # trainer.parallel_weights = loaded_parallel_weights
-        import pdb
-        pdb.set_trace()
         eval_dataset, eval_dict = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, split_name, test_datasets=args.eval_datasets, eval_dir=args.eval_dir)
         eval_loader = DataLoader(eval_dataset,
                                  batch_size=1,
