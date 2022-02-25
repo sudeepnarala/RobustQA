@@ -205,7 +205,7 @@ class Trainer():
                         batch[key] = batch[key].squeeze(0)
                     a_t = torch.optim.Adam(model.parameters(), lr=self.args.lr)
                     # Fine tune on train
-                    for epoch in range(15):
+                    for epoch in range(0):
                         for i in range(batch["input_ids"].shape[0] // 10 + 1):
                             minibatch = {key: batch[key][10*i:10*i+10] for key in batch}
                             a_t.zero_grad()
