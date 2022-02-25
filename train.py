@@ -453,8 +453,8 @@ def main():
         # model.to(args.device)
         # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
         model = ParallelModel.from_pretrained(checkpoint_path)
-        model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
-        model.to(args.device)
+        # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
+        # model.to(args.device)
         loaded_parallel_weights = torch.load(os.path.join(args.save_dir, "parallel_weights"))
         trainer.parallel_weights = loaded_parallel_weights
         import pdb
