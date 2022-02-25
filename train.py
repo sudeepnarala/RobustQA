@@ -203,7 +203,7 @@ class Trainer():
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
                         batch[key] = batch[key].squeeze(0)
-                    a_t = torch.optim.Adam(model.parameters(), lr=0.001)
+                    a_t = torch.optim.Adam(model.parameters(), lr=self.args.lr)
                     # Fine tune on train
                     for i in range(batch["input_ids"].shape[0] // 10 + 1):
                         minibatch = {key: batch[key][10*i:10*i+10] for key in batch}
