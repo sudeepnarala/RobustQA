@@ -73,11 +73,15 @@ def create_mask(input_ids, tokenizer, ratio=0.15):
 def get_augmented_data(input_ids, bert_mlm_model, tokenizer):
     sep_mask = tokenizer("[SEP] [MASK]")["input_ids"]
     mask_token = sep_mask[2]
-    augmented_input_ids = torch.clone(input_ids)
+    augmented_input_ids = torch.clone(torch.tensor(input_ids))
+    print("Creating mask....")
     create_mask(augmented_input_ids, tokenizer, 0.15)   # Modifies inplace
-    out = bert_mlm_model(input_ids=augmented_input_ids)
+    print("Getting results for masked tokens....")
+    with torch.no_grad():
+        out = bert_mlm_model(input_ids=augmented_input_ids)
     if "logits" in out:
         out = out["logits"]
+    print("Using masked token results....")
     for i, question_context_ids in enumerate(augmented_input_ids):
         maximal_tokens = torch.argmax(out[i][question_context_ids == mask_token], dim=-1)
         question_context_ids[question_context_ids == mask_token] = maximal_tokens
@@ -167,7 +171,8 @@ def prepare_train_data(dataset_dict, tokenizer):
         if key == "input_ids":
             continue
         tokenized_examples_augmented[key] = tokenized_examples[key]
-
+    import pdb
+    pdb.set_trace()
     return tokenized_examples
 
 
