@@ -55,7 +55,7 @@ def prepare_eval_data(dataset_dict, tokenizer):
     return tokenized_examples
 
 
-def create_mask(input_ids, start_positions, end_positions, tokenizer, ratio=0.25):
+def create_mask(input_ids, start_positions, end_positions, tokenizer, mask_ratio=0.25):
     """
     :param input_ids: Dimension (num_train, max_seq_len)
     Masks tokens inplace after [SEP] (i.e. just in context and not question)
@@ -85,8 +85,7 @@ def create_mask(input_ids, start_positions, end_positions, tokenizer, ratio=0.25
     # Don't mask on or after last [SEP] token
     random_tensor[torch.ge(mask_tensor, sep_end_repeat)] = 1
 
-    input_ids.masked_fill_(random_tensor <= ratio, mask_token)
-    import pdb; pdb.set_trace();    # Check whether masking actually worked!
+    input_ids.masked_fill_(random_tensor <= mask_ratio, mask_token)
 
     # for i, question_context_ids in enumerate(input_ids):
     #     # Corresponds to one question + context pair
@@ -109,10 +108,12 @@ def create_mask(input_ids, start_positions, end_positions, tokenizer, ratio=0.25
     #         pass
     #     question_context_ids.masked_fill_(random_tensor <= ratio, mask_token)
 
-def get_augmented_data(tokenized_examples, bert_mlm_model, tokenizer, augment_percent=1, save_dir=None):
+def get_augmented_data(tokenized_examples, bert_mlm_model, tokenizer, augment_percent=1, save_dir=None, mask_ratio=0.0):
     """
     param tokenized_examples: Dictionary
     """
+    return pickle.load(open(os.path.join("save/dataaug-14", "augmented_data/{}".format(mask_ratio)), "rb"))
+
     sep_mask = tokenizer("[SEP] [MASK]")["input_ids"]
     mask_token = sep_mask[2]
     print("Using augment percent of {}".format(augment_percent))
@@ -124,7 +125,7 @@ def get_augmented_data(tokenized_examples, bert_mlm_model, tokenizer, augment_pe
     augmented_tokenized_examples["input_ids"] = torch.tensor(augmented_tokenized_examples["input_ids"])
     print("Creating mask....")
     create_mask(augmented_tokenized_examples["input_ids"], augmented_tokenized_examples["start_positions"],
-                augmented_tokenized_examples["end_positions"], tokenizer, 0.25)   # Modifies input_ids inplace
+                augmented_tokenized_examples["end_positions"], tokenizer, mask_ratio=mask_ratio)   # Modifies input_ids inplace
     print("Getting results for masked tokens....")
     augmented_tokenized_examples["input_ids"] = torch.tensor(augmented_tokenized_examples["input_ids"])
     dataset = TensorDataset(augmented_tokenized_examples["input_ids"])
@@ -145,8 +146,10 @@ def get_augmented_data(tokenized_examples, bert_mlm_model, tokenizer, augment_pe
                 idx += 1
 
             progress_bar.update(out.shape[0])
-    # if save_dir:
-    #     pickle.dump(augmented_tokenized_examples, open(os.path.join(save_dir, "augmented_data"), "wb"))
+    if save_dir:
+        if not os.path.exists(os.path.join(save_dir, "augmented_data")):
+            os.makedirs(os.path.join(save_dir, "augmented_data"))
+        pickle.dump(augmented_tokenized_examples, open(os.path.join(save_dir, "augmented_data/{}".format(mask_ratio)), "wb"))
     # print("Loading augmented_tokenized_examples")
     # augmented_tokenized_examples = pickle.load(open("save/dataaug_real_test-02/augmented_data", "rb"))
     # print("Loaded augmented_tokenized_examples")
@@ -161,7 +164,7 @@ def get_augmented_data(tokenized_examples, bert_mlm_model, tokenizer, augment_pe
 
 
 
-def prepare_train_data(dataset_dict, tokenizer, save_dir=None):
+def prepare_train_data(dataset_dict, tokenizer, save_dir=None, mask_ratio=0.0, augment_with_original=True):
     tokenized_examples = tokenizer(dataset_dict['question'],
                                    dataset_dict['context'],
                                    truncation="only_second",
@@ -228,17 +231,18 @@ def prepare_train_data(dataset_dict, tokenizer, save_dir=None):
 
     # Now augment the data
     mlm_model = DistilBertForMaskedLM.from_pretrained("distilbert-base-uncased")
-    tokenized_examples_augmented = get_augmented_data(tokenized_examples, mlm_model, tokenizer, save_dir=save_dir)
+    tokenized_examples_augmented = get_augmented_data(tokenized_examples, mlm_model, tokenizer, save_dir=save_dir, mask_ratio=mask_ratio, augment_percent=1)
     # Merge augmented + regular
     for key in tokenized_examples.keys():
+        if not augment_with_original:
+            tokenized_examples[key] = []
         tokenized_examples[key] += tokenized_examples_augmented[key]
         del tokenized_examples_augmented[key]
 
     return tokenized_examples
 
 
-
-def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
+def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split, mask_ratio=0.0, augment_with_original=True):
     #TODO: cache this if possible
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
     # Stop caching!
@@ -246,7 +250,7 @@ def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, spli
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
-            tokenized_examples = prepare_train_data(dataset_dict, tokenizer, save_dir=args.save_dir)
+            tokenized_examples = prepare_train_data(dataset_dict, tokenizer, save_dir=args.save_dir, mask_ratio=mask_ratio, augment_with_original=augment_with_original)
         else:
             tokenized_examples = prepare_eval_data(dataset_dict, tokenizer)
         # Stop caching here
@@ -313,56 +317,58 @@ class Trainer():
             return preds, results
         return results
 
-    def train(self, model, train_dataloader, eval_dataloader, val_dict):
+    def train(self, model, train_dataloaders, eval_dataloader, val_dict):
         device = self.device
         model.to(device)
         optim = AdamW(model.parameters(), lr=self.lr)
         global_idx = 0
         best_scores = {'F1': -1.0, 'EM': -1.0}
         tbx = SummaryWriter(self.save_dir)
-
-        for epoch_num in range(self.num_epochs):
-            self.log.info(f'Epoch: {epoch_num}')
-            print("{} is the dataset size!".format(len(train_dataloader.dataset)))
-            with torch.enable_grad(), tqdm(total=len(train_dataloader.dataset)) as progress_bar:
-                for batch in train_dataloader:
-                    optim.zero_grad()
-                    model.train()
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    start_positions = batch['start_positions'].to(device)
-                    end_positions = batch['end_positions'].to(device)
-                    outputs = model(input_ids, attention_mask=attention_mask,
-                                    start_positions=start_positions,
-                                    end_positions=end_positions)
-                    loss = outputs[0]
-                    loss.backward()
-                    optim.step()
-                    progress_bar.update(len(input_ids))
-                    progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
-                    tbx.add_scalar('train/NLL', loss.item(), global_idx)
-                    if (global_idx % self.eval_every) == 0:
-                        self.log.info(f'Evaluating at step {global_idx}...')
-                        preds, curr_score = self.evaluate(model, eval_dataloader, val_dict, return_preds=True)
-                        results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in curr_score.items())
-                        self.log.info('Visualizing in TensorBoard...')
-                        for k, v in curr_score.items():
-                            tbx.add_scalar(f'val/{k}', v, global_idx)
-                        self.log.info(f'Eval {results_str}')
-                        if self.visualize_predictions:
-                            util.visualize(tbx,
-                                           pred_dict=preds,
-                                           gold_dict=val_dict,
-                                           step=global_idx,
-                                           split='val',
-                                           num_visuals=self.num_visuals)
-                        if curr_score['F1'] >= best_scores['F1']:
-                            best_scores = curr_score
-                            self.save(model)
-                    global_idx += 1
+        if not type(train_dataloaders) == list:
+            train_dataloaders = [train_dataloaders]     # Just one dataloader, i.e. not curriculum learning
+        for train_dataloader in train_dataloaders:
+            for epoch_num in range(self.num_epochs):
+                self.log.info(f'Epoch: {epoch_num}')
+                print("{} is the dataset size!".format(len(train_dataloader.dataset)))
+                with torch.enable_grad(), tqdm(total=len(train_dataloader.dataset)) as progress_bar:
+                    for batch in train_dataloader:
+                        optim.zero_grad()
+                        model.train()
+                        input_ids = batch['input_ids'].to(device)
+                        attention_mask = batch['attention_mask'].to(device)
+                        start_positions = batch['start_positions'].to(device)
+                        end_positions = batch['end_positions'].to(device)
+                        outputs = model(input_ids, attention_mask=attention_mask,
+                                        start_positions=start_positions,
+                                        end_positions=end_positions)
+                        loss = outputs[0]
+                        loss.backward()
+                        optim.step()
+                        progress_bar.update(len(input_ids))
+                        progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
+                        tbx.add_scalar('train/NLL', loss.item(), global_idx)
+                        if (global_idx % self.eval_every) == 0:
+                            self.log.info(f'Evaluating at step {global_idx}...')
+                            preds, curr_score = self.evaluate(model, eval_dataloader, val_dict, return_preds=True)
+                            results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in curr_score.items())
+                            self.log.info('Visualizing in TensorBoard...')
+                            for k, v in curr_score.items():
+                                tbx.add_scalar(f'val/{k}', v, global_idx)
+                            self.log.info(f'Eval {results_str}')
+                            if self.visualize_predictions:
+                                util.visualize(tbx,
+                                               pred_dict=preds,
+                                               gold_dict=val_dict,
+                                               step=global_idx,
+                                               split='val',
+                                               num_visuals=self.num_visuals)
+                            if curr_score['F1'] >= best_scores['F1']:
+                                best_scores = curr_score
+                                self.save(model)
+                        global_idx += 1
         return best_scores
 
-def get_dataset(args, datasets, data_dir, tokenizer, split_name):
+def get_dataset(args, datasets, data_dir, tokenizer, split_name, mask_ratio=0.0, augment_with_original=True):
     datasets = datasets.split(',')
     dataset_dict = None
     dataset_name=''
@@ -370,7 +376,7 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
         dataset_name += f'_{dataset}'
         dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
-    data_encodings = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
+    data_encodings = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name, mask_ratio=mask_ratio, augment_with_original=augment_with_original)
     return util.QADataset(data_encodings, train=(split_name=='train')), dataset_dict
 
 def main():
@@ -384,6 +390,14 @@ def main():
     model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
+    # import pdb; pdb.set_trace();
+    # Freeze layers except last and linear layer
+    # model.distilbert.requires_grad_(False)
+    # model.distilbert.transformer.layer[3].requires_grad_(True)
+    # model.distilbert.transformer.layer[4].requires_grad_(True)
+    # model.distilbert.transformer.layer[5].requires_grad_(True)
+    # model.qa_outputs.requires_grad_(False)
+
     if args.do_train:
         if not os.path.exists(args.save_dir):
             os.makedirs(args.save_dir)
@@ -393,23 +407,29 @@ def main():
         log.info("Preparing Training Data...")
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         trainer = Trainer(args, log)
-        train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train')
+        # Most of experiment data is here!
+        mask_ratios = [0, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4]
+        train_loaders = []
+        for mask_ratio in mask_ratios:
+            train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train', mask_ratio=mask_ratio, augment_with_original=False)
+            train_loader = DataLoader(train_dataset,
+                                      batch_size=args.batch_size,
+                                      sampler=RandomSampler(train_dataset))
+            # 3 epochs per ratio
+            train_loaders.append(train_loader)
         log.info("Preparing Validation Data...")
         val_dataset, val_dict = get_dataset(args, args.train_datasets, args.val_dir, tokenizer, 'val')
-        train_loader = DataLoader(train_dataset,
-                                batch_size=args.batch_size,
-                                sampler=RandomSampler(train_dataset))
         val_loader = DataLoader(val_dataset,
                                 batch_size=args.batch_size,
                                 sampler=SequentialSampler(val_dataset))
-        best_scores = trainer.train(model, train_loader, val_loader, val_dict)
+        best_scores = trainer.train(model, train_loaders, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
         log = util.get_logger(args.save_dir, f'log_{split_name}')
         trainer = Trainer(args, log)
         checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
-        model = DistilBertForQuestionAnswering.from_pretrained("baseline-02/checkpoint")
+        model = DistilBertForQuestionAnswering.from_pretrained("save/baseline-02/checkpoint")
         model.to(args.device)
         eval_dataset, eval_dict = get_dataset(args, args.eval_datasets, args.eval_dir, tokenizer, split_name)
         eval_loader = DataLoader(eval_dataset,
