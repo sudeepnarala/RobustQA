@@ -178,6 +178,7 @@ class QADataset(Dataset):
         self.keys = ['input_ids', 'attention_mask']
         if train:
             self.keys += ['start_positions', 'end_positions']
+        print(list(self.keys), list(self.encodings.keys()))
         assert(all(key in self.encodings for key in self.keys))
 
     def __getitem__(self, idx):
