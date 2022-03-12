@@ -10,6 +10,8 @@ from transformers import DistilBertForQuestionAnswering
 from transformers import AdamW
 from tensorboardX import SummaryWriter
 
+from clustering_model import ClusterModel
+
 
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import RandomSampler, SequentialSampler
@@ -149,7 +151,8 @@ class Trainer():
             os.makedirs(self.path)
 
     def save(self, model):
-        model.save_pretrained(self.path)
+        # TODO: SAVE RESULTS
+        # model.save_pretrained(self.path)
 
     def evaluate(self, model, data_loader, data_dict, return_preds=False, split='validation'):
         device = self.device
@@ -204,15 +207,14 @@ class Trainer():
             self.log.info(f'Epoch: {epoch_num}')
             with torch.enable_grad(), tqdm(total=len(train_dataloader.dataset)) as progress_bar:
                 for batch in train_dataloader:
+                    # import pdb; pdb.set_trace()
                     optim.zero_grad()
                     model.train()
                     input_ids = batch['input_ids'].to(device)
                     attention_mask = batch['attention_mask'].to(device)
                     start_positions = batch['start_positions'].to(device)
                     end_positions = batch['end_positions'].to(device)
-                    outputs = model(input_ids, attention_mask=attention_mask,
-                                    start_positions=start_positions,
-                                    end_positions=end_positions)
+                    outputs = model(input_ids, attention_mask=attention_mask, start_positions=start_positions, end_positions=end_positions)
                     loss = outputs[0]
                     loss.backward()
                     optim.step()
@@ -256,7 +258,8 @@ def main():
     args = get_train_test_args()
 
     util.set_seed(args.seed)
-    model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
+    # model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
+    model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=5)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
