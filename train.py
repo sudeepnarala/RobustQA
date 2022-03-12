@@ -261,10 +261,10 @@ def main():
 
     util.set_seed(args.seed)
     # model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
-    model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=6)
+    # model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=6)
     checkpoint_path = os.path.join("save/baseline-02/checkpoint")
     # TODO: Change this, manually loading from baseline-02
-    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=5)
+    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=3)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
@@ -287,7 +287,7 @@ def main():
                                 sampler=SequentialSampler(val_dataset))
         # import pdb; pdb.set_trace();
         # Freeze Distilbert
-        # model.distilbert.requires_grad_(False)
+        model.distilbert.requires_grad_(False)
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')

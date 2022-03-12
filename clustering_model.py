@@ -100,7 +100,7 @@ class ClusterModel(DistilBertForQuestionAnswering):
         cluster_queries /= math.sqrt(self.config.dim)
         cluster_logits = torch.sum(cluster_queries*self.cluster_keys, dim=-1)   # (bs, num_clusters, dim) * (num_clusters, dim) then (bs, num_clusters)
         cluster_coefficients = F.softmax(cluster_logits, dim=-1)       # (bs, num_clusters)
-        # print(cluster_coefficients[0])
+        # print(cluster_coefficients)
         # Penalize variance? --> i.e. (0.5, 0.5) is ok but (0.33, 0.2, 0.2, 0.1,....) is not
         # max_coeffs =
         # total_loss +=
