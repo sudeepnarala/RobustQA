@@ -34,7 +34,7 @@ class ClusterModel(DistilBertForQuestionAnswering):
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         model.cluster_keys = torch.randn(num_clusters, model.config.dim)
         model.cluster_keys = model.cluster_keys.to(device)
-        model.cluster_transformers = torch.nn.ModuleList([TransformerBlock(model.config) for _ in range(num_clusters)])
+        model.cluster_transformers = torch.nn.ModuleList([TransformerBlock(model.config) for _ in range(2*num_clusters)])
         model.lin_query = torch.nn.Linear(model.config.dim, model.config.dim)
         # for module in model.cluster_transformers.modules():
         #     init_weights(module)
@@ -89,7 +89,8 @@ class ClusterModel(DistilBertForQuestionAnswering):
         cluster_hidden_states = []
         cluster_queries = []
         for cluster_idx in range(self.num_clusters):
-            cluster_hidden_state = self.cluster_transformers[cluster_idx](hidden_states, attn_mask=attention_mask, head_mask=head_mask)[0]   # (bs, max_query_len, dim)
+            cluster_hidden_state = self.cluster_transformers[cluster_idx*2](hidden_states, attn_mask=attention_mask, head_mask=head_mask)[0]   # (bs, max_query_len, dim)
+            cluster_hidden_state = self.cluster_transformers[cluster_idx*2+1](cluster_hidden_state, attn_mask=attention_mask, head_mask=head_mask)[0]   # (bs, max_query_len, dim)
             queries = self.lin_query(cluster_hidden_state[:, 0, :])     # (bs, dim)
             queries = queries.unsqueeze(dim=1)
             cluster_queries.append(queries)
@@ -100,7 +101,6 @@ class ClusterModel(DistilBertForQuestionAnswering):
         cluster_queries /= math.sqrt(self.config.dim)
         cluster_logits = torch.sum(cluster_queries*self.cluster_keys, dim=-1)   # (bs, num_clusters, dim) * (num_clusters, dim) then (bs, num_clusters)
         cluster_coefficients = F.softmax(cluster_logits, dim=-1)       # (bs, num_clusters)
-        print(cluster_coefficients)
         # Penalize variance? --> i.e. (0.5, 0.5) is ok but (0.33, 0.2, 0.2, 0.1,....) is not
         # max_coeffs =
         # total_loss +=
