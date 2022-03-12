@@ -7,6 +7,7 @@ import csv
 import util
 from transformers import DistilBertTokenizerFast
 from transformers import DistilBertForQuestionAnswering
+from transformers import DistilBertForMaskedLM
 from transformers import AdamW
 from tensorboardX import SummaryWriter
 
@@ -49,6 +50,52 @@ def prepare_eval_data(dataset_dict, tokenizer):
         ]
 
     return tokenized_examples
+
+def create_mask(input_ids, tokenizer, ratio=0.15):
+    """
+    :param input_ids: Dimension (num_train, max_seq_len)
+    Masks tokens inplace after [SEP] (i.e. just in context and not question)
+    """
+    # Get id corresponding to [SEP] and [MASK]
+    sep_mask = tokenizer("[SEP] [MASK]")["input_ids"]
+    sep_token = sep_mask[1]
+    mask_token = sep_mask[2]
+    for question_context_ids in input_ids:
+        # Corresponds to one question + context pair
+
+        sep_locs = torch.nonzero(question_context_ids == sep_token).flatten()
+        # Find the first [SEP] token
+        sep_location = sep_locs[0]
+        # Find the end location
+        end_location = sep_locs[1]
+        # Mask "ratio" of tokens from sep_location to end_location
+        random_tensor = torch.rand(end_location-sep_location-1)   # Don't include either of [SEP]'s
+        question_context_ids[sep_location+1:end_location].masked_fill_(random_tensor <= ratio, mask_token)
+
+def get_augmented_data(input_ids, bert_mlm_model, tokenizer):
+    sep_mask = tokenizer("[SEP] [MASK]")["input_ids"]
+    mask_token = sep_mask[2]
+    augmented_input_ids = torch.clone(torch.tensor(input_ids))
+    print("Creating mask....")
+    create_mask(augmented_input_ids, tokenizer, 0.15)   # Modifies inplace
+    print("Getting results for masked tokens....")
+    with torch.no_grad():
+        out = bert_mlm_model(input_ids=augmented_input_ids)
+    if "logits" in out:
+        out = out["logits"]
+    print("Using masked token results....")
+    for i, question_context_ids in enumerate(augmented_input_ids):
+        maximal_tokens = torch.argmax(out[i][question_context_ids == mask_token], dim=-1)
+        question_context_ids[question_context_ids == mask_token] = maximal_tokens
+
+    return augmented_input_ids
+# from transformers import DistilBertTokenizerFast
+# from transformers import DistilBertForMaskedLM
+# tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+# model = DistilBertForMaskedLM.from_pretrained("distilbert-base-uncased")
+# a = tokenizer("This is a [MASK].", return_tensors='pt')
+# out = model(**a)
+# tokenizer.decode(a["input_ids"], skip_special_tokens=True)
 
 
 
@@ -116,6 +163,18 @@ def prepare_train_data(dataset_dict, tokenizer):
 
     total = len(tokenized_examples['id'])
     print(f"Preprocessing not completely accurate for {inaccurate}/{total} instances")
+
+    # Now augment the data
+    mlm_model = DistilBertForMaskedLM.from_pretrained("distilbert-base-uncased")
+    augmented_ids = get_augmented_data(tokenized_examples["input_ids"], mlm_model, tokenizer)
+    # All start/end positions are the same so we can copy every other key
+    tokenized_examples_augmented = {"input_ids": augmented_ids}
+    for key in tokenized_examples.keys():
+        if key == "input_ids":
+            continue
+        tokenized_examples_augmented[key] = tokenized_examples[key]
+    import pdb
+    pdb.set_trace()
     return tokenized_examples
 
 
@@ -132,7 +191,6 @@ def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, spli
             tokenized_examples = prepare_eval_data(dataset_dict, tokenizer)
         util.save_pickle(tokenized_examples, cache_path)
     return tokenized_examples
-
 
 
 #TODO: use a logger, use tensorboard
