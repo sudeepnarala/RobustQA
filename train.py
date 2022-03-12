@@ -147,12 +147,14 @@ class Trainer():
         self.save_dir = args.save_dir
         self.log = log
         self.visualize_predictions = args.visualize_predictions
+        self.args = args
         if not os.path.exists(self.path):
             os.makedirs(self.path)
 
     def save(self, model):
-        # TODO: SAVE RESULTS
         # model.save_pretrained(self.path)
+        torch.save(model.state_dict(), os.path.join(self.args.save_dir, "save_dict"))
+        # torch.save(self.parallel_weights, os.path.join(self.args.save_dir, "parallel_weights"))
 
     def evaluate(self, model, data_loader, data_dict, return_preds=False, split='validation'):
         device = self.device
@@ -280,6 +282,7 @@ def main():
         val_loader = DataLoader(val_dataset,
                                 batch_size=args.batch_size,
                                 sampler=SequentialSampler(val_dataset))
+        import pdb; pdb.set_trace();
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
