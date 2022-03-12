@@ -262,9 +262,9 @@ def main():
     util.set_seed(args.seed)
     # model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
     model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=5)
-    # checkpoint_path = os.path.join("save/baseline-02/checkpoint")
+    checkpoint_path = os.path.join("save/baseline-02/checkpoint")
     # TODO: Change this, manually loading from baseline-02
-    # model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=5)
+    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=5)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
@@ -296,7 +296,7 @@ def main():
         trainer = Trainer(args, log)
         # checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
         # model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
-        model.load_state_dict(torch.load("save_dict"))
+        model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
         model.to(args.device)
         # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
         eval_dataset, eval_dict = get_dataset(args, args.eval_datasets, args.eval_dir, tokenizer, split_name)
