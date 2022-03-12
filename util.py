@@ -1,3 +1,4 @@
+import copy
 import json
 import random
 import os
@@ -11,6 +12,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 
 def set_seed(seed):
@@ -187,6 +189,7 @@ class QADataset(Dataset):
     def __len__(self):
         return len(self.encodings['input_ids'])
 
+<<<<<<< HEAD
 class QADataset_Meta(Dataset):
     def __init__(self, encodings, dataset_idx, args, train=True):
         self.encodings = encodings
@@ -227,6 +230,78 @@ class QADataset_Meta(Dataset):
         return int(m/self.num_query) + 1
 
 
+=======
+class QADatasets(Dataset):
+    def __init__(self, encodings, num_support, num_query, test_encodings=None):
+        """
+        encodings: List of size num_datasets with data_encodings for each dataset
+        test_included: Indicates first half are training, second half are test for meta-learning, 1 to one mapping
+        """
+        self.encodings = encodings
+        self.test_encodings = test_encodings
+        self.support_keys = ['input_ids', 'attention_mask']
+        self.query_keys = ['input_ids', 'attention_mask']
+        self.num_support = num_support  # Support size
+        self.num_query = num_query      # Query size
+        self.test = test_encodings is not None
+        # Most should be query
+        if not self.test:
+            self.support_keys += ['start_positions', 'end_positions']
+            self.query_keys += ['start_positions', 'end_positions']
+        else:
+            self.support_keys += ['start_positions', 'end_positions']
+
+        # torch.random.seed()
+        for dataset_encodings in self.encodings:
+            assert(all(key in dataset_encodings for key in self.query_keys))
+        # TODO: Shuffle using same random seed across each access in dict!
+        if not self.test:
+            self.num_possible_supports = min(map(lambda x: len(x["input_ids"]), self.encodings)) // (self.num_query + self.num_support)
+        else:
+            self.num_possible_supports = 1
+        # Split between support and query
+        if not self.test:
+            self.encodings_support = []
+            for dataset_encodings in self.encodings:
+                # Partition on each of the keys
+                self.encodings_support.append({key: dataset_encodings[key][:self.num_possible_supports*self.num_support] for key in self.support_keys})
+            self.encodings_query = []
+            for dataset_encodings in self.encodings:
+                self.encodings_query.append({key: dataset_encodings[key][self.num_possible_supports * self.num_support:self.num_possible_supports * self.num_support + self.num_possible_supports * self.num_query] for key in self.query_keys})
+        else:
+            self.encodings_support = []
+            for dataset_encodings in self.encodings:
+                self.encodings_support.append({key: dataset_encodings[key] for key in self.support_keys})
+            self.encodings_query = []
+            for dataset_encodings in test_encodings:
+                self.encodings_query.append({key: dataset_encodings[key] for key in self.query_keys})
+
+    def __getitem__(self, idx):
+        if not self.test:
+            ret = []
+            for support, query in zip(self.encodings_support, self.encodings_query):
+                ret.append({
+                    "support": {key : torch.tensor(support[key][idx*self.num_support:idx*self.num_support+self.num_support]) for key in self.support_keys},
+                            "query": {key : torch.tensor(query[key][idx*self.num_query:idx*self.num_query+self.num_query]) for key in self.query_keys}
+                })
+            return ret
+        else:
+            # If test, send all support and query
+            ret = []
+            for support, query in zip(self.encodings_support, self.encodings_query):
+                ret.append({
+                    "support": {key: torch.tensor(
+                        support[key]) for key in
+                                self.support_keys},
+                    "query": {key: torch.tensor(query[key])
+                              for key in self.query_keys}
+                })
+            return ret
+
+    def __len__(self):
+        # return len(self.encodings['input_ids'])
+        return self.num_possible_supports
+>>>>>>> 41efb27c06a1a528fe10353b4b831d481fde1c7b
 
 def read_squad(path):
     path = Path(path)
@@ -459,8 +534,9 @@ def postprocess_qa_predictions(examples, features, predictions,
 
         best_non_null_pred = predictions[i]
         all_predictions[example["id"]] = best_non_null_pred["text"]
+        prediction_confidence = best_non_null_pred["start_logit"]*best_non_null_pred["end_logit"]
 
-    return all_predictions
+    return all_predictions, prediction_confidence
 
 
 
