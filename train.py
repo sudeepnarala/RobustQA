@@ -154,7 +154,7 @@ class Trainer():
         self.device = args.device
 
     def save(self, model):
-        model.save_pretrained(self.path)
+        model.save_pretrained('../save/vanilla')
 
     # There is a difference between meta-learning evaluation and final prediction evaluation
     # We won't really do eval during training for meta-learning
@@ -184,7 +184,8 @@ class Trainer():
                     # Change weights based on forward from "support"
                     alpha = 0.4
                     weights = torch.nn.Parameter(torch.clone(model.parallel.weight))
-                    out = model.forward_meta(**batch, weights=weights)
+                    model.qa_outputs.weight = weights
+                    out = model.forward(**batch)
                     loss = out[0]
                     grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
                     meta_weight = weights - alpha*grad
@@ -199,7 +200,8 @@ class Trainer():
                         # Outputs from regular forward
                         outputs_regular = model(input_ids, attention_mask=attention_mask)
                         # Outputs from metalearning layer
-                        outputs_meta = model.forward_meta(input_ids, attention_mask=attention_mask, weights=meta_weight)
+                        model.qa_outputs.weight = meta_weight
+                        outputs_meta = model(input_ids, attention_mask=attention_mask)
                         # Forward
                         start_logits_regular, end_logits_regular = outputs_regular.start_logits, outputs_regular.end_logits
                         start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
@@ -247,9 +249,10 @@ class Trainer():
 
     def inner_loop(self, qa, model: DistilBertForQuestionAnswering):
         alpha = 0.3     # Learning rate, default from MAML code
-        params = torch.clone(model.parallel.weight)
+        params = torch.clone(model.qa_outputs.weight)
         params = torch.nn.Parameter(params)
-        out = model.forward_meta(**qa, weights=params)
+        model.qa_outputs.weight = params
+        out = model(**qa)
         loss = out[0]
         grad = torch.autograd.grad(loss, params, create_graph=True)[0]
         params.requires_grad = False
@@ -273,8 +276,8 @@ class Trainer():
             #                 start_positions=start_positions,
             #                 end_positions=end_positions)
             # Overwrite the model linear weights with params, assume inner_loop returns the weights of last layer
-            model.parallel.weight = torch.nn.Parameter(params)
-            out = model.forward_meta(**qa_query)
+            model.qa_outputs.weight = torch.nn.Parameter(params)
+            out = model(**qa_query)
             loss = out[0]
             outer_loss_batch.append(loss)
         outer_loss = torch.mean(torch.stack(outer_loss_batch))
@@ -306,16 +309,6 @@ class Trainer():
                 for task_batch in train_dataloader:
                     optim.zero_grad()
                     model.train()
-# from parallel_model import ParallelModel
-# m = ParallelModel.from_pretrained("distilbert-base-uncased")
-# batch = task_batch
-# input_ids = batch['input_ids'].to(device)
-# attention_mask = batch['attention_mask'].to(device)
-# start_positions = batch['start_positions'].to(device)
-# end_positions = batch['end_positions'].to(device)
-# outputs = m.forward_p(input_ids, attention_mask=attention_mask, start_positions=start_positions, end_positions=end_positions)
-# loss = outputs[0]
-# loss.backward()
 #                     model.parallel.requires_grad_(False)
                     loss = self.outer_step(task_batch, model)
                     loss.backward()
@@ -324,29 +317,7 @@ class Trainer():
             self.save(model)
         return 0
 
-                    # progress_bar.update(len(input_ids))
-                    # progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
-                    # tbx.add_scalar('train/NLL', loss.item(), global_idx)
-                    # if (global_idx % self.eval_every) == 0:
-                    #     self.log.info(f'Evaluating at step {global_idx}...')
-                    #     preds, curr_score = self.evaluate(model, eval_dataloader, val_dict, return_preds=True)
-                    #     results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in curr_score.items())
-                    #     self.log.info('Visualizing in TensorBoard...')
-                    #     for k, v in curr_score.items():
-                    #         tbx.add_scalar(f'val/{k}', v, global_idx)
-                    #     self.log.info(f'Eval {results_str}')
-                    #     if self.visualize_predictions:
-                    #         util.visualize(tbx,
-                    #                        pred_dict=preds,
-                    #                        gold_dict=val_dict,
-                    #                        step=global_idx,
-                    #                        split='val',
-                    #                        num_visuals=self.num_visuals)
-                    #     if curr_score['F1'] >= best_scores['F1']:
-                    #         best_scores = curr_score
-                    #         self.save(model)
-                    # global_idx += 1
-        # return best_scores
+                    
 
 def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=None, eval_dir=None):
     """
@@ -388,10 +359,10 @@ def main():
     args = get_train_test_args()
 
     util.set_seed(args.seed)
-    # model = ParallelModel.from_pretrained("distilbert-base-uncased")
+    model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
+    
     checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
-    # TODO: ADD THIS BACK ON AZURE
-    model = ParallelModel.from_pretrained(checkpoint_path, init_parallel=True)
+    model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
 
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
@@ -419,9 +390,7 @@ def main():
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
         log = util.get_logger(args.save_dir, f'log_{split_name}')
         trainer = Trainer(args, log)
-        checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
-        # model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
-        model = ParallelModel.from_pretrained(checkpoint_path, init_parallel=False)     # Should load linear weights from training
+      
         model.to(args.device)
         eval_dataset, eval_dict = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, split_name, test_datasets=args.eval_datasets, eval_dir=args.eval_dir)
         eval_loader = DataLoader(eval_dataset,
