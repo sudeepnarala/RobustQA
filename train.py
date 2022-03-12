@@ -123,7 +123,7 @@ def prepare_train_data(dataset_dict, tokenizer):
 def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
     #TODO: cache this if possible
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
-    if os.path.exists(cache_path) and not args.recompute_features:
+    if False and os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
@@ -261,7 +261,8 @@ def main():
 
     util.set_seed(args.seed)
     # model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
-    model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=5)
+    # model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=5)
+    model = ClusterModel.from_pretrained(, num_clusters=5)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
@@ -282,7 +283,7 @@ def main():
         val_loader = DataLoader(val_dataset,
                                 batch_size=args.batch_size,
                                 sampler=SequentialSampler(val_dataset))
-        import pdb; pdb.set_trace();
+        # import pdb; pdb.set_trace();
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
