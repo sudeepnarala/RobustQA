@@ -286,15 +286,19 @@ def main():
                                 batch_size=args.batch_size,
                                 sampler=SequentialSampler(val_dataset))
         # import pdb; pdb.set_trace();
+        # Freeze Distilbert
+        # model.distilbert.requires_grad_(False)
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
         log = util.get_logger(args.save_dir, f'log_{split_name}')
         trainer = Trainer(args, log)
-        checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
-        model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+        # checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
+        # model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+        model.load_state_dict(torch.load("save_dict"))
         model.to(args.device)
+        # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
         eval_dataset, eval_dict = get_dataset(args, args.eval_datasets, args.eval_dir, tokenizer, split_name)
         eval_loader = DataLoader(eval_dataset,
                                  batch_size=args.batch_size,

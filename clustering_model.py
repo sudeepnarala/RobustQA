@@ -1,8 +1,10 @@
 from transformers import DistilBertForQuestionAnswering
 from transformers.modeling_outputs import QuestionAnsweringModelOutput
 import torch
+from torch import nn
 import torch.nn.functional as F
 from transformers.models.distilbert.modeling_distilbert import TransformerBlock
+import math
 
 class ClusterModel(DistilBertForQuestionAnswering):
     @classmethod
@@ -14,9 +16,29 @@ class ClusterModel(DistilBertForQuestionAnswering):
         # s.parallel = torch.nn.Linear(768, 2, bias=True)
         # device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         # s.parallel = s.parallel.to(device)
-        model.cluster_keys = torch.nn.Linear(model.config.dim, num_clusters)    # bias set to true, so not really dot-product
+        def init_weights(module):
+            if isinstance(module, nn.Linear):
+                # Slightly different from the TF version which uses truncated_normal for initialization
+                # cf https://github.com/pytorch/pytorch/pull/5617
+                module.weight.data.normal_(mean=0.0, std=model.config.initializer_range)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=model.config.initializer_range)
+                if module.padding_idx is not None:
+                    module.weight.data[module.padding_idx].zero_()
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+        model.cluster_keys = torch.nn.Linear(model.config.dim, num_clusters, bias=False)
         model.cluster_transformers = torch.nn.ModuleList([TransformerBlock(model.config) for _ in range(num_clusters)])
+        model.lin_query = torch.nn.Linear(model.config.dim, model.config.dim)
+        # for module in model.cluster_transformers.modules():
+        #     init_weights(module)
+        # init_weights(model.cluster_keys)
         model.num_clusters = num_clusters
+        torch.nn.init.xavier_uniform_(model.cluster_keys.weight)
+        torch.nn.init.xavier_uniform_(model.lin_query.weight)
         # s.forward = cls.forward
         return model
 
@@ -32,7 +54,6 @@ class ClusterModel(DistilBertForQuestionAnswering):
             output_attentions=None,
             output_hidden_states=None,
             return_dict=None,
-            weights=None
     ):
         r"""
         start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -58,17 +79,19 @@ class ClusterModel(DistilBertForQuestionAnswering):
         hidden_states = distilbert_output[0]  # (bs, max_query_len, dim)
         # final_attention = distilbert_output[1][-1]
         # Compute cluster logits based on [CLS] token
-        cluster_logits = self.cluster_keys(hidden_states[:,0,:])    # (bs, num_clusters)
-        cluster_logits /= self.config.dim       # Normalization for dimension per head
-
+        queries = self.lin_query(hidden_states[:,0,:])
+        queries /= math.sqrt(self.config.dim)
+        cluster_logits = self.cluster_keys(queries)    # (bs, num_clusters)
         cluster_hidden_states = []
         for cluster_idx in range(self.num_clusters):
             cluster_hidden_state = self.cluster_transformers[cluster_idx](hidden_states, attn_mask=attention_mask, head_mask=head_mask)[0]   # (bs, max_query_len, dim)
             cluster_hidden_state = torch.unsqueeze(cluster_hidden_state, dim=1)    # (bs, 1, max_query_len, dim)
             cluster_hidden_states.append(cluster_hidden_state)
-
         cluster_hidden_states = torch.cat(cluster_hidden_states, dim=1)     # (bs, num_clusters, max_query_len, dim)
         cluster_coefficients = F.softmax(cluster_logits, dim=-1)       # (bs, num_clusters)
+        # print(cluster_coefficients)
+        # print(cluster_coefficients[0])
+
         cluster_coefficients = cluster_coefficients.unsqueeze(-1).unsqueeze(-1)\
             .repeat(1, 1, cluster_hidden_states.shape[2], cluster_hidden_states.shape[3])
         hidden_states = cluster_coefficients*cluster_hidden_states
