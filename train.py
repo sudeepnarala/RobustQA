@@ -261,7 +261,7 @@ def main():
 
     util.set_seed(args.seed)
     # model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
-    model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=5)
+    model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=6)
     checkpoint_path = os.path.join("save/baseline-02/checkpoint")
     # TODO: Change this, manually loading from baseline-02
     model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=5)
