@@ -264,7 +264,7 @@ def main():
     # model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=6)
     checkpoint_path = os.path.join("save/baseline-02/checkpoint")
     # TODO: Change this, manually loading from baseline-02
-    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=3)
+    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=10)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
