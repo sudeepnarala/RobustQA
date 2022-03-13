@@ -182,7 +182,7 @@ class Trainer():
                     # Adapt theta for meta-learning
                     # Change weights based on forward from "support"
                     alpha = 0.4
-                    weights = torch.nn.Parameter(torch.clone(model.parallel.weight))
+                    weights = torch.nn.Parameter(torch.clone(model.qa_outputs.weight))
                     model.qa_outputs.weight = weights
                     out = model.forward(**batch)
                     loss = out[0]
