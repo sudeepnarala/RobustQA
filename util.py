@@ -181,6 +181,7 @@ class QADataset(Dataset):
         self.keys = ['input_ids', 'attention_mask']
         if train:
             self.keys += ['start_positions', 'end_positions']
+        
         assert(all(key in self.encodings for key in self.keys))
 
     def __getitem__(self, idx):
@@ -211,6 +212,7 @@ class QADatasets(Dataset):
 
         # torch.random.seed()
         for dataset_encodings in self.encodings:
+            
             assert(all(key in dataset_encodings for key in self.query_keys))
         # TODO: Shuffle using same random seed across each access in dict!
         if not self.test:

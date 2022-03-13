@@ -12,12 +12,11 @@ from transformers import DistilBertForQuestionAnswering
 from transformers import AdamW
 from tensorboardX import SummaryWriter
 
-from collections import defaultdict
+
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import RandomSampler, SequentialSampler
 from args import get_train_test_args
 
-from parallel_model import ParallelModel
 
 from tqdm import tqdm
 
@@ -33,20 +32,16 @@ def prepare_eval_data(dataset_dict, tokenizer):
     # Since one example might give us several features if it has a long context, we need a map from a feature to
     # its corresponding example. This key gives us just that.
     sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
-    dataset_idx = defaultdict(lambda : [])
+
     # For evaluation, we will need to convert our predictions to substrings of the context, so we keep the
     # corresponding example_id and we will store the offset mappings.
     tokenized_examples["id"] = []
-    tokenized_examples['dataset'] = []
     for i in tqdm(range(len(tokenized_examples["input_ids"]))):
         # Grab the sequence corresponding to that example (to know what is the context and what is the question).
         sequence_ids = tokenized_examples.sequence_ids(i)
-        
         # One example can give several spans, this is the index of the example containing this span of text.
         sample_index = sample_mapping[i]
         tokenized_examples["id"].append(dataset_dict["id"][sample_index])
-        tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
-        dataset_idx[dataset_dict['dataset'][sample_index]].append(sample_index)
         # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
         # position is part of the context or not.
         tokenized_examples["offset_mapping"][i] = [
@@ -54,26 +49,32 @@ def prepare_eval_data(dataset_dict, tokenizer):
             for k, o in enumerate(tokenized_examples["offset_mapping"][i])
         ]
 
-    return tokenized_examples, dataset_idx
+    return tokenized_examples
 
 
 
 def prepare_train_data(dataset_dict, tokenizer):
-    tokenized_examples = tokenizer(dataset_dict['question'], dataset_dict['context'], truncation="only_second",stride=128,max_length=384,return_overflowing_tokens=True,return_offsets_mapping=True,padding='max_length')
+    tokenized_examples = tokenizer(dataset_dict['question'],
+                                   dataset_dict['context'],
+                                   truncation="only_second",
+                                   stride=128,
+                                   max_length=384,
+                                   return_overflowing_tokens=True,
+                                   return_offsets_mapping=True,
+                                   padding='max_length')
     sample_mapping = tokenized_examples["overflow_to_sample_mapping"]
     offset_mapping = tokenized_examples["offset_mapping"]
-    dataset_idx = defaultdict(lambda : [])
+
     # Let's label those examples!
     tokenized_examples["start_positions"] = []
     tokenized_examples["end_positions"] = []
     tokenized_examples['id'] = []
-    tokenized_examples['dataset'] = []
     inaccurate = 0
     for i, offsets in enumerate(tqdm(offset_mapping)):
         # We will label impossible answers with the index of the CLS token.
         input_ids = tokenized_examples["input_ids"][i]
         cls_index = input_ids.index(tokenizer.cls_token_id)
-        tokenized_examples['dataset'] = []
+
         # Grab the sequence corresponding to that example (to know what is the context and what is the question).
         sequence_ids = tokenized_examples.sequence_ids(i)
 
@@ -84,8 +85,6 @@ def prepare_train_data(dataset_dict, tokenizer):
         start_char = answer['answer_start'][0]
         end_char = start_char + len(answer['text'][0])
         tokenized_examples['id'].append(dataset_dict['id'][sample_index])
-        tokenized_examples['dataset'].append(dataset_dict['dataset'][sample_index])
-        dataset_idx[dataset_dict['dataset'][sample_index]].append(i)
         # Start token index of the current span in the text.
         token_start_index = 0
         while sequence_ids[token_start_index] != 1:
@@ -118,23 +117,22 @@ def prepare_train_data(dataset_dict, tokenizer):
 
     total = len(tokenized_examples['id'])
     print(f"Preprocessing not completely accurate for {inaccurate}/{total} instances")
-    return tokenized_examples, dataset_idx
+    return tokenized_examples
 
 
 
 def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
     #TODO: cache this if possible
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
-    #TODO: FIX_SN: Remove cache
-    if False and os.path.exists(cache_path) and not args.recompute_features:
+    if os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
-            tokenized_examples, dataset_idx = prepare_train_data(dataset_dict, tokenizer)
+            tokenized_examples = prepare_train_data(dataset_dict, tokenizer)
         else:
-            tokenized_examples, dataset_idx = prepare_eval_data(dataset_dict, tokenizer)
+            tokenized_examples = prepare_eval_data(dataset_dict, tokenizer)
         util.save_pickle(tokenized_examples, cache_path)
-    return tokenized_examples, dataset_idx
+    return tokenized_examples
 
 
 
@@ -155,7 +153,7 @@ class Trainer():
         self.device = args.device
 
     def save(self, model):
-        model.save_pretrained('../save/vanilla')
+        model.save_pretrained(self.path)
 
     # There is a difference between meta-learning evaluation and final prediction evaluation
     # We won't really do eval during training for meta-learning
@@ -199,27 +197,17 @@ class Trainer():
                         input_ids = batch["input_ids"][10*i:10*i+10]
                         attention_mask = batch["attention_mask"][10 * i:10 * i + 10]
                         # Outputs from regular forward
-                        outputs_regular = model(input_ids, attention_mask=attention_mask)
-                        # Outputs from metalearning layer
                         model.qa_outputs.weight = meta_weight
                         outputs_meta = model(input_ids, attention_mask=attention_mask)
                         # Forward
-                        start_logits_regular, end_logits_regular = outputs_regular.start_logits, outputs_regular.end_logits
                         start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
                         # TODO: compute loss
 
-                        all_start_logits_regular.append(start_logits_regular)
-                        all_end_logits_regular.append(end_logits_regular)
                         all_start_logits_meta.append(start_logits_meta)
                         all_end_logits_meta.append(end_logits_meta)
                     # progress_bar.update(batch_size)
 
-        # Get F1 and EM scores
-        start_logits = torch.cat(all_start_logits_regular).cpu().numpy()
-        end_logits = torch.cat(all_end_logits_regular).cpu().numpy()
-        preds_regular, confidence_regular = util.postprocess_qa_predictions(data_dict,
-                                                 data_loader.dataset.encodings,
-                                                 (start_logits, end_logits))
+      
 
         start_logits = torch.cat(all_start_logits_meta).cpu().numpy()
         end_logits = torch.cat(all_end_logits_meta).cpu().numpy()
@@ -228,13 +216,10 @@ class Trainer():
                                                 (start_logits, end_logits))
         # Pick between preds_regular and preds_meta based on metric of confidence
         preds = {}
-        for id in preds_regular:
-            c_r = confidence_regular[id]
+        for id in preds_meta:
             c_m = confidence_meta[id]
-            if c_r > c_m:
-                preds[id] = preds_regular[id]
-            else:
-                preds[id] = preds_meta[id]
+         
+            preds[id] = preds_meta[id]
 
         if split == 'validation':
             results = util.eval_dicts(data_dict, preds)
@@ -260,20 +245,9 @@ class Trainer():
         params -= alpha*grad
         return params
 
-    def stack_on_all_keys(self, list_d):
-        ret = {}
-        for d in list_d:
-            for key in d:
-                if key not in ret:
-                    ret[key] = d[key]
-                else:
-                    ret[key] = torch.cat((ret[key], d[key]), dim=0)
-
-        return ret
-
     def outer_step(self, task_batch, model: DistilBertForQuestionAnswering):
         outer_loss_batch = []
-        parallel_weight_orig = copy.copy(model.parallel.weight)
+        weight_orig = copy.copy(model.qa_outputs.weight)
         for task in task_batch:
             print("FINISHED 1 TASK")
             qa_support, qa_query = task["support"], task["query"]
@@ -293,7 +267,7 @@ class Trainer():
             loss = out[0]
             outer_loss_batch.append(loss)
         outer_loss = torch.mean(torch.stack(outer_loss_batch))
-        model.parallel.weight = parallel_weight_orig
+        model.qa_outputs.weight = weight_orig
         return outer_loss
 
     def train(self, model: DistilBertForQuestionAnswering, train_dataloader):
@@ -321,6 +295,16 @@ class Trainer():
                 for task_batch in train_dataloader:
                     optim.zero_grad()
                     model.train()
+# from parallel_model import ParallelModel
+# m = ParallelModel.from_pretrained("distilbert-base-uncased")
+# batch = task_batch
+# input_ids = batch['input_ids'].to(device)
+# attention_mask = batch['attention_mask'].to(device)
+# start_positions = batch['start_positions'].to(device)
+# end_positions = batch['end_positions'].to(device)
+# outputs = m.forward_p(input_ids, attention_mask=attention_mask, start_positions=start_positions, end_positions=end_positions)
+# loss = outputs[0]
+# loss.backward()
 #                     model.parallel.requires_grad_(False)
                     loss = self.outer_step(task_batch, model)
                     loss.backward()
@@ -329,7 +313,29 @@ class Trainer():
             self.save(model)
         return 0
 
-                    
+                    # progress_bar.update(len(input_ids))
+                    # progress_bar.set_postfix(epoch=epoch_num, NLL=loss.item())
+                    # tbx.add_scalar('train/NLL', loss.item(), global_idx)
+                    # if (global_idx % self.eval_every) == 0:
+                    #     self.log.info(f'Evaluating at step {global_idx}...')
+                    #     preds, curr_score = self.evaluate(model, eval_dataloader, val_dict, return_preds=True)
+                    #     results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in curr_score.items())
+                    #     self.log.info('Visualizing in TensorBoard...')
+                    #     for k, v in curr_score.items():
+                    #         tbx.add_scalar(f'val/{k}', v, global_idx)
+                    #     self.log.info(f'Eval {results_str}')
+                    #     if self.visualize_predictions:
+                    #         util.visualize(tbx,
+                    #                        pred_dict=preds,
+                    #                        gold_dict=val_dict,
+                    #                        step=global_idx,
+                    #                        split='val',
+                    #                        num_visuals=self.num_visuals)
+                    #     if curr_score['F1'] >= best_scores['F1']:
+                    #         best_scores = curr_score
+                    #         self.save(model)
+                    # global_idx += 1
+        # return best_scores
 
 def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=None, eval_dir=None):
     """
@@ -371,9 +377,9 @@ def main():
     args = get_train_test_args()
 
     util.set_seed(args.seed)
-    model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
-    
+    # model = ParallelModel.from_pretrained("distilbert-base-uncased")
     checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
+    # TODO: ADD THIS BACK ON AZURE
     model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
 
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
@@ -385,7 +391,6 @@ def main():
         log = util.get_logger(args.save_dir, 'log_train')
         log.info(f'Args: {json.dumps(vars(args), indent=4, sort_keys=True)}')
         log.info("Preparing Training Data...")
-        # try:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         trainer = Trainer(args, log)
         train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train')
@@ -403,7 +408,9 @@ def main():
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
         log = util.get_logger(args.save_dir, f'log_{split_name}')
         trainer = Trainer(args, log)
-      
+        checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
+        model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+        #model = ParallelModel.from_pretrained(checkpoint_path, init_parallel=False)     # Should load linear weights from training
         model.to(args.device)
         eval_dataset, eval_dict = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, split_name, test_datasets=args.eval_datasets, eval_dir=args.eval_dir)
         eval_loader = DataLoader(eval_dataset,
