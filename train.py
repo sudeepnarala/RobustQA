@@ -163,8 +163,7 @@ class Trainer():
 
         model.eval()
         pred_dict = {}
-        all_start_logits_regular = []
-        all_end_logits_regular = []
+
         all_start_logits_meta = []
         all_end_logits_meta = []
         # with torch.no_grad(), \
@@ -188,7 +187,7 @@ class Trainer():
                     loss = out[0]
                     grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
                     meta_weight = weights - alpha*grad
-
+                    meta_weight = meta_weight.cpu().detach()
                     batch = task["query"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
@@ -197,7 +196,7 @@ class Trainer():
                         input_ids = batch["input_ids"][10*i:10*i+10]
                         attention_mask = batch["attention_mask"][10 * i:10 * i + 10]
                         # Outputs from regular forward
-                        model.qa_outputs.weight = meta_weight
+                        model.qa_outputs.weight = torch.nn.Parameter(meta_weight)
                         outputs_meta = model(input_ids, attention_mask=attention_mask)
                         # Forward
                         start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
