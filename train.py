@@ -203,14 +203,14 @@ class Trainer():
                         start_logits_meta, end_logits_meta = outputs_meta.start_logits, outputs_meta.end_logits
                         # TODO: compute loss
 
-                        all_start_logits_meta.append(start_logits_meta.cpu())
-                        all_end_logits_meta.append(end_logits_meta.cpu())
+                        all_start_logits_meta.append(start_logits_meta.cpu().detach().numpy())
+                        all_end_logits_meta.append(end_logits_meta.cpu().detach().numpy())
                     # progress_bar.update(batch_size)
 
       
 
-        start_logits = torch.cat(all_start_logits_meta).cpu().numpy()
-        end_logits = torch.cat(all_end_logits_meta).cpu().numpy()
+        start_logits = torch.cat(all_start_logits_meta)
+        end_logits = torch.cat(all_end_logits_meta)
         preds_meta, confidence_meta = util.postprocess_qa_predictions(data_dict,
                                                 data_loader.dataset.encodings,
                                                 (start_logits, end_logits))
