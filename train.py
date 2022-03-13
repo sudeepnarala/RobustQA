@@ -8,17 +8,23 @@ import util
 from transformers import DistilBertTokenizerFast
 tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 from transformers import DistilBertForQuestionAnswering
+from transformers import DistilBertForMaskedLM
 from transformers import AdamW
 from tensorboardX import SummaryWriter
+import numpy as np
+import pickle
 
 from clustering_model import ClusterModel
 
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torch.utils.data.sampler import RandomSampler, SequentialSampler
 from args import get_train_test_args
 
 from tqdm import tqdm
+
+torch.random.manual_seed(42)
+np.random.seed(42)
 
 def prepare_eval_data(dataset_dict, tokenizer):
     tokenized_examples = tokenizer(dataset_dict['question'],
@@ -52,8 +58,116 @@ def prepare_eval_data(dataset_dict, tokenizer):
     return tokenized_examples
 
 
+def create_mask(input_ids, start_positions, end_positions, tokenizer, mask_ratio=0.25):
+    """
+    :param input_ids: Dimension (num_train, max_seq_len)
+    Masks tokens inplace after [SEP] (i.e. just in context and not question)
+    """
+    # Get id corresponding to [SEP] and [MASK]
+    sep_mask = tokenizer("[SEP] [MASK]")["input_ids"]
+    sep_token = sep_mask[1]
+    mask_token = sep_mask[2]
+    sep_locs = torch.nonzero(input_ids == sep_token)   # 2 per input_ids row (2*num_train, 2)
+    sep_locs = sep_locs.view(input_ids.shape[0], 4)
+    # Select just indices and reshape
+    # Not the result we want
+    sep_locs = torch.transpose(torch.masked_select(sep_locs, torch.tensor([False, True, False, True])).view(input_ids.shape[0], 2), 0, 1)
 
-def prepare_train_data(dataset_dict, tokenizer):
+    # Much faster, no for loops! This wasn't the bottleneck though :(, for loops probably ok here.
+    random_tensor = torch.rand(input_ids.shape)
+    # Create a mask tensor
+    mask_tensor = torch.tensor(range(input_ids.shape[1])).unsqueeze(0).repeat(input_ids.shape[0], 1)
+    sep_start_repeat = sep_locs[0].unsqueeze(-1).repeat(1, input_ids.shape[1])
+    sep_end_repeat = sep_locs[1].unsqueeze(-1).repeat(1, input_ids.shape[1])
+    answer_start_repeat = torch.tensor(start_positions).unsqueeze(-1).repeat(1, input_ids.shape[1])
+    answer_end_repeat = torch.tensor(end_positions).unsqueeze(-1).repeat(1, input_ids.shape[1])
+    # Don't mask question or [SEP] token
+    random_tensor[torch.le(mask_tensor, sep_start_repeat)] = 1
+    # Don't mask answer
+    random_tensor[torch.ge(mask_tensor, answer_start_repeat) & torch.le(mask_tensor, answer_end_repeat)] = 1
+    # Don't mask on or after last [SEP] token
+    random_tensor[torch.ge(mask_tensor, sep_end_repeat)] = 1
+
+    input_ids.masked_fill_(random_tensor <= mask_ratio, mask_token)
+
+    # for i, question_context_ids in enumerate(input_ids):
+    #     # Corresponds to one question + context pair
+    #     # import pdb; pdb.set_trace()
+    #     sep_locs = torch.nonzero(question_context_ids == sep_token).flatten()
+    #     # Find the first [SEP] token
+    #     sep_location = sep_locs[0]
+    #     # Find the end location
+    #     end_location = sep_locs[1]
+    #     # Mask "ratio" of tokens from sep_location to end_location
+    #     # random_tensor = torch.rand(end_location-sep_location-1)   # Don't include either of [SEP]'s
+    #     random_tensor = torch.rand(question_context_ids.shape[0])
+    #     random_tensor[:sep_location+1] = torch.ones(sep_location+1)
+    #     random_tensor[end_location:] = torch.ones(question_context_ids.shape[0]-end_location)
+    #
+    #     # Don't change tokens corresponding to answer
+    #     try:
+    #         random_tensor[start_positions[i]:end_positions[i]+1] = torch.ones(end_positions[i]-start_positions[i]+1)
+    #     except RuntimeError:    # Means end_position < start_position, data not processed properly
+    #         pass
+    #     question_context_ids.masked_fill_(random_tensor <= ratio, mask_token)
+
+def get_augmented_data(tokenized_examples, bert_mlm_model, tokenizer, augment_percent=1, save_dir=None, mask_ratio=0.0):
+    """
+    param tokenized_examples: Dictionary
+    """
+    return pickle.load(open(os.path.join("save/dataaug-14", "augmented_data/{}".format(mask_ratio)), "rb"))
+
+    sep_mask = tokenizer("[SEP] [MASK]")["input_ids"]
+    mask_token = sep_mask[2]
+    print("Using augment percent of {}".format(augment_percent))
+    augment_mask = np.random.rand(len(tokenized_examples["id"])) < augment_percent  # Which tokenized examples to augment
+    augmented_tokenized_examples = {key: [] for key in tokenized_examples.keys()}
+    for idx in np.where(augment_mask)[0]:
+        for key in tokenized_examples.keys():
+            augmented_tokenized_examples[key].append(tokenized_examples[key][idx])
+    augmented_tokenized_examples["input_ids"] = torch.tensor(augmented_tokenized_examples["input_ids"])
+    print("Creating mask....")
+    create_mask(augmented_tokenized_examples["input_ids"], augmented_tokenized_examples["start_positions"],
+                augmented_tokenized_examples["end_positions"], tokenizer, mask_ratio=mask_ratio)   # Modifies input_ids inplace
+    print("Getting results for masked tokens....")
+    augmented_tokenized_examples["input_ids"] = torch.tensor(augmented_tokenized_examples["input_ids"])
+    dataset = TensorDataset(augmented_tokenized_examples["input_ids"])
+    mask_dataloader = DataLoader(dataset, batch_size=64, sampler=SequentialSampler(dataset))
+    idx = 0
+    with torch.no_grad(), tqdm(total=len(augmented_tokenized_examples["input_ids"])) as progress_bar:
+        for batch in mask_dataloader:
+            # batch = batch[0]
+            out = bert_mlm_model(input_ids=batch[0])
+            out = out["logits"]     # (32, max_seq_len, vocab_size)
+            for i, question_context_ids in enumerate(batch[0]):
+                try:
+                    maximal_tokens = torch.argmax(out[i][question_context_ids == mask_token], dim=-1)
+                    question_context_ids[question_context_ids == mask_token] = maximal_tokens
+                    augmented_tokenized_examples["input_ids"][idx] = question_context_ids
+                except RuntimeError:
+                    pass
+                idx += 1
+
+            progress_bar.update(out.shape[0])
+    if save_dir:
+        if not os.path.exists(os.path.join(save_dir, "augmented_data")):
+            os.makedirs(os.path.join(save_dir, "augmented_data"))
+        pickle.dump(augmented_tokenized_examples, open(os.path.join(save_dir, "augmented_data/{}".format(mask_ratio)), "wb"))
+    # print("Loading augmented_tokenized_examples")
+    # augmented_tokenized_examples = pickle.load(open("save/dataaug_real_test-02/augmented_data", "rb"))
+    # print("Loaded augmented_tokenized_examples")
+    return augmented_tokenized_examples
+# from transformers import DistilBertTokenizerFast
+# from transformers import DistilBertForMaskedLM
+# tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+# model = DistilBertForMaskedLM.from_pretrained("distilbert-base-uncased")
+# a = tokenizer("This is a [MASK].", return_tensors='pt')
+# out = model(**a)
+# tokenizer.decode(a["input_ids"], skip_special_tokens=True)
+
+
+
+def prepare_train_data(dataset_dict, tokenizer, save_dir=None, mask_ratio=0.0, augment_with_original=True):
     tokenized_examples = tokenizer(dataset_dict['question'],
                                    dataset_dict['context'],
                                    truncation="only_second",
@@ -117,23 +231,35 @@ def prepare_train_data(dataset_dict, tokenizer):
 
     total = len(tokenized_examples['id'])
     print(f"Preprocessing not completely accurate for {inaccurate}/{total} instances")
+
+    # Now augment the data
+    mlm_model = DistilBertForMaskedLM.from_pretrained("distilbert-base-uncased")
+    tokenized_examples_augmented = get_augmented_data(tokenized_examples, mlm_model, tokenizer, save_dir=save_dir, mask_ratio=mask_ratio, augment_percent=1)
+    # Merge augmented + regular
+    for key in tokenized_examples.keys():
+        if not augment_with_original:
+            tokenized_examples[key] = []
+        tokenized_examples[key] += tokenized_examples_augmented[key]
+        del tokenized_examples_augmented[key]
+
     return tokenized_examples
 
 
-
-def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
+def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split, mask_ratio=0.0, augment_with_original=True):
     #TODO: cache this if possible
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
+
+    # Stop caching!
     if False and os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
     else:
         if split=='train':
-            tokenized_examples = prepare_train_data(dataset_dict, tokenizer)
+            tokenized_examples = prepare_train_data(dataset_dict, tokenizer, save_dir=args.save_dir, mask_ratio=mask_ratio, augment_with_original=augment_with_original)
         else:
             tokenized_examples = prepare_eval_data(dataset_dict, tokenizer)
-        util.save_pickle(tokenized_examples, cache_path)
+        # Stop caching here
+        # util.save_pickle(tokenized_examples, cache_path)
     return tokenized_examples
-
 
 
 #TODO: use a logger, use tensorboard
@@ -198,7 +324,7 @@ class Trainer():
             return preds, results
         return results
 
-    def train(self, model, train_dataloader, eval_dataloader, val_dict):
+    def train(self, model, train_dataloaders, eval_dataloader, val_dict):
         device = self.device
         model.to(device)
         optim = AdamW(model.parameters(), lr=self.lr)
@@ -245,7 +371,7 @@ class Trainer():
                     global_idx += 1
         return best_scores
 
-def get_dataset(args, datasets, data_dir, tokenizer, split_name):
+def get_dataset(args, datasets, data_dir, tokenizer, split_name, mask_ratio=0.0, augment_with_original=True):
     datasets = datasets.split(',')
     dataset_dict = None
     dataset_name=''
@@ -253,7 +379,7 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
         dataset_name += f'_{dataset}'
         dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
-    data_encodings = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
+    data_encodings = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name, mask_ratio=mask_ratio, augment_with_original=augment_with_original)
     return util.QADataset(data_encodings, train=(split_name=='train')), dataset_dict
 
 def main():
@@ -261,12 +387,21 @@ def main():
     args = get_train_test_args()
 
     util.set_seed(args.seed)
+
     # model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
     # model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=6)
     checkpoint_path = os.path.join("save/baseline-02/checkpoint")
     # TODO: Change this, manually loading from baseline-02
     model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=2)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+
+    # import pdb; pdb.set_trace();
+    # Freeze layers except last and linear layer
+    # model.distilbert.requires_grad_(False)
+    # model.distilbert.transformer.layer[3].requires_grad_(True)
+    # model.distilbert.transformer.layer[4].requires_grad_(True)
+    # model.distilbert.transformer.layer[5].requires_grad_(True)
+    # model.qa_outputs.requires_grad_(False)
 
     if args.do_train:
         if not os.path.exists(args.save_dir):
@@ -277,21 +412,26 @@ def main():
         log.info("Preparing Training Data...")
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         trainer = Trainer(args, log)
-        train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train')
+        # Most of experiment data is here!
+        train_loaders = []
+        train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train', mask_ratio=0.25, augment_with_original=True)
+        train_loader = DataLoader(train_dataset,
+                                  batch_size=args.batch_size,
+                                  sampler=RandomSampler(train_dataset))
+        # 3 epochs per ratio
+        train_loaders.append(train_loader)
         log.info("Preparing Validation Data...")
         val_dataset, val_dict = get_dataset(args, args.train_datasets, args.val_dir, tokenizer, 'val')
-        train_loader = DataLoader(train_dataset,
-                                batch_size=args.batch_size,
-                                sampler=RandomSampler(train_dataset))
         val_loader = DataLoader(val_dataset,
                                 batch_size=args.batch_size,
                                 sampler=SequentialSampler(val_dataset))
         # import pdb; pdb.set_trace();
         # Freeze Distilbert
-        model.distilbert.transformer.requires_grad_(False)
-        model.distilbert.transformer.layer[-2].requires_grad_(True)  # This is a cluster layer
-        model.distilbert.transformer.layer[-1].requires_grad_(True)     # This is a cluster layer
+        # model.distilbert.transformer.requires_grad_(False)
+        # model.distilbert.transformer.layer[-2].requires_grad_(True)  # This is a cluster layer
+        # model.distilbert.transformer.layer[-1].requires_grad_(True)     # This is a cluster layer
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
+
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
@@ -302,6 +442,7 @@ def main():
         model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
         model.to(args.device)
         # model.load_state_dict(torch.load(os.path.join(args.save_dir, "save_dict")))
+
         eval_dataset, eval_dict = get_dataset(args, args.eval_datasets, args.eval_dir, tokenizer, split_name)
         eval_loader = DataLoader(eval_dataset,
                                  batch_size=args.batch_size,
