@@ -32,7 +32,7 @@ class ClusterModel(DistilBertForQuestionAnswering):
                 module.weight.data.fill_(1.0)
         # model.cluster_keys = torch.nn.Linear(model.config.dim, 1, bias=False)
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        model.cluster_keys = torch.randn(num_clusters, model.config.dim)
+        model.cluster_keys = torch.randn(num_clusters, model.config.dim, requires_grad=True)
         model.cluster_keys = model.cluster_keys.to(device)
         model.cluster_transformers = torch.nn.ModuleList([TransformerBlock(model.config) for _ in range(num_clusters)])
         model.lin_query = torch.nn.Linear(model.config.dim, model.config.dim)
@@ -42,7 +42,7 @@ class ClusterModel(DistilBertForQuestionAnswering):
         model.num_clusters = num_clusters
         torch.nn.init.xavier_uniform_(model.cluster_keys)
         torch.nn.init.xavier_uniform_(model.lin_query.weight)
-        model.gamma = 0.2
+        model.gamma = 3
         # s.forward = cls.forward
         return model
 
@@ -100,11 +100,15 @@ class ClusterModel(DistilBertForQuestionAnswering):
         cluster_queries /= math.sqrt(self.config.dim)
         cluster_logits = torch.sum(cluster_queries*self.cluster_keys, dim=-1)   # (bs, num_clusters, dim) * (num_clusters, dim) then (bs, num_clusters)
         cluster_coefficients = F.softmax(cluster_logits, dim=-1)       # (bs, num_clusters)
+        print(cluster_coefficients[0])
+        loss = self.gamma*torch.mean(-torch.log(1-torch.max(cluster_coefficients, dim=-1)[0]), dim=0)
+        print("LOSS: {}".format(loss))
         # print(cluster_coefficients)
         # Penalize variance? --> i.e. (0.5, 0.5) is ok but (0.33, 0.2, 0.2, 0.1,....) is not
         # max_coeffs =
         # total_loss +=
-        cluster_coefficients = cluster_coefficients.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, cluster_hidden_states.shape[2], cluster_hidden_states.shape[3])
+        # cluster_coefficients = cluster_coefficients.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, cluster_hidden_states.shape[2], cluster_hidden_states.shape[3])
+        cluster_coefficients = cluster_coefficients.unsqueeze(-1).unsqueeze(-1)
         hidden_states = cluster_coefficients*cluster_hidden_states
         hidden_states = hidden_states.sum(dim=1)/self.num_clusters   # Average
         # TODO: FILL IN
@@ -116,7 +120,7 @@ class ClusterModel(DistilBertForQuestionAnswering):
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
         end_logits = end_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
-
+        # print(loss)
         total_loss = None
         if start_positions is not None and end_positions is not None:
             # If we are on multi-GPU, split add a dimension
@@ -133,6 +137,10 @@ class ClusterModel(DistilBertForQuestionAnswering):
             start_loss = loss_fct(start_logits, start_positions)
             end_loss = loss_fct(end_logits, end_positions)
             total_loss = (start_loss + end_loss) / 2
+            curr = total_loss
+            total_loss += loss
+            print("TOTAL LOSS: {}".format(total_loss))
+            # print(curr, loss)
         if not return_dict:
             output = (start_logits, end_logits) + distilbert_output[1:]
             return ((total_loss,) + output) if total_loss is not None else output
