@@ -255,13 +255,8 @@ class Trainer():
         model.qa_outputs.weight = params
         out = model(**qa)
         loss = out[0]
-<<<<<<< HEAD
-        params = model.qa_outputs.weight
-        grad = torch.autograd.grad(loss, model.qa_outputs, create_graph=True)[0]
-=======
         grad = torch.autograd.grad(loss, params, create_graph=True)[0]
         params.requires_grad = False
->>>>>>> 41efb27c06a1a528fe10353b4b831d481fde1c7b
         params -= alpha*grad
         return params
 
@@ -278,18 +273,6 @@ class Trainer():
 
     def outer_step(self, task_batch, model: DistilBertForQuestionAnswering):
         outer_loss_batch = []
-<<<<<<< HEAD
-        qa_outputs_weight = copy.copy(model.qa_outputs.weight)
-    #    import pdb
-    #    pdb.set_trace()
-        for task in task_batch:
-            qa_support, qa_query = task
-            if not qa_support:
-                continue
-            # Stack
-            qa_support = qa_support.to(self.device)
-            qa_query = qa_query.to(self.device)
-=======
         parallel_weight_orig = copy.copy(model.parallel.weight)
         for task in task_batch:
             print("FINISHED 1 TASK")
@@ -300,7 +283,6 @@ class Trainer():
             for key in qa_query:
                 qa_query[key] = qa_query[key].to(self.device)
                 qa_query[key] = qa_query[key].squeeze(0)
->>>>>>> 41efb27c06a1a528fe10353b4b831d481fde1c7b
             params = self.inner_loop(qa_support, model)
             # outputs = model(input_ids, attention_mask=attention_mask,
             #                 start_positions=start_positions,
@@ -363,12 +345,6 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=N
     # Instead of merging datasets, just split them
     for dataset in datasets:
         dataset_name += f'_{dataset}'
-<<<<<<< HEAD
-        dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
-        dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
-    data_encodings, dataset_idx = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
-    return util.QADataset_Meta(data_encodings, dataset_idx, args, train=(split_name=='train')), dataset_dict
-=======
         current_dataset_dict = util.read_squad(f'{data_dir}/{dataset}')
         data_encodings = read_and_process(args, tokenizer, current_dataset_dict, data_dir, dataset_name, "train")
         all_data_encodings.append(data_encodings)
@@ -389,7 +365,6 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name, test_datasets=N
         return util.QADatasets(all_data_encodings, num_support=args.num_support, num_query=args.num_query, test_encodings=test_data_encodings), dataset_dict
 
     return util.QADatasets(all_data_encodings, num_support=args.num_support, num_query=args.num_query), dataset_dict
->>>>>>> 41efb27c06a1a528fe10353b4b831d481fde1c7b
 
 def main():
     # define parser and arguments
@@ -415,20 +390,6 @@ def main():
         trainer = Trainer(args, log)
         train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train')
         log.info("Preparing Validation Data...")
-<<<<<<< HEAD
-        val_dataset, val_dict = get_dataset(args, args.train_datasets, args.val_dir, tokenizer, 'val')
-        train_loader = DataLoader(train_dataset,
-                                batch_size=1, #CHANGE LATER
-                                sampler=RandomSampler(train_dataset))
-        val_loader = DataLoader(val_dataset,
-                                batch_size=1, #CHANGE LATER
-                                sampler=SequentialSampler(val_dataset))
-        # except Exception as e:
-        #     import pdb; pdb.set_trace()
-        # import pdb
-        # pdb.set_trace()
-        best_scores = trainer.train(model, train_loader, val_loader, val_dict)
-=======
         # val_dataset, val_dict  = get_dataset(args, args.train_datasets, args.val_dir, tokenizer, 'val')
         train_loader = DataLoader(dataset=train_dataset,
                                 batch_size=args.batch_size,
@@ -437,7 +398,6 @@ def main():
         #                         batch_size=args.batch_size,
         #                         sampler=SequentialSampler(val_dataset))
         best_scores = trainer.train(model, train_loader)
->>>>>>> 41efb27c06a1a528fe10353b4b831d481fde1c7b
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         split_name = 'test' if 'test' in args.eval_dir else 'validation'

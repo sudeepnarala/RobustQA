@@ -189,48 +189,6 @@ class QADataset(Dataset):
     def __len__(self):
         return len(self.encodings['input_ids'])
 
-<<<<<<< HEAD
-class QADataset_Meta(Dataset):
-    def __init__(self, encodings, dataset_idx, args, train=True):
-        self.encodings = encodings
-        self.keys = ['input_ids', 'attention_mask']
-        #self.sampling_type = 'uniform'
-        self.num_support = args.num_support
-        self.num_query = args.num_query
-        self.bs = args.batch_size
-        self.dataset_idx = dataset_idx
-        if train:
-            self.keys += ['start_positions', 'end_positions']
-        assert(all(key in self.encodings for key in self.keys))
-
-    def __getitem__(self, idx):
-        batch = []
-        for k in self.dataset_idx.keys():
-            questions_support, questions_query = [], []
-            idx_list = self.dataset_idx[k]
-            for i in idx_list[self.num_query*idx: self.num_query*(idx+1)]:
-                item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
-                questions_query.append(item)
-            sups = idx_list[0: self.num_query*idx] + idx_list[self.num_query*(idx+1):]
-            sup_idxs = random.sample(sups, self.num_support)
-            for i in sup_idxs:
-                item = {key : torch.tensor(self.encodings[key][i]) for key in self.keys}
-                questions_support.append(item)
-            if len(questions_query) != 0:
-                task = (questions_support, questions_query)
-                batch.append(task)
-            import pdb
-            pdb.set_trace()
-        return batch
-
-    def __len__(self):
-        m = float('-inf')
-        for k in self.dataset_idx.keys():
-            m = max(len(self.dataset_idx[k]), m)
-        return int(m/self.num_query) + 1
-
-
-=======
 class QADatasets(Dataset):
     def __init__(self, encodings, num_support, num_query, test_encodings=None):
         """
@@ -301,7 +259,6 @@ class QADatasets(Dataset):
     def __len__(self):
         # return len(self.encodings['input_ids'])
         return self.num_possible_supports
->>>>>>> 41efb27c06a1a528fe10353b4b831d481fde1c7b
 
 def read_squad(path):
     path = Path(path)
