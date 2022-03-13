@@ -34,7 +34,13 @@ class ClusterModel(DistilBertForQuestionAnswering):
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         model.cluster_keys = torch.randn(num_clusters, model.config.dim, requires_grad=True)
         model.cluster_keys = model.cluster_keys.to(device)
-        model.cluster_transformers = torch.nn.ModuleList([TransformerBlock(model.config) for _ in range(num_clusters)])
+        model.cluster_transformers = torch.nn.ModuleList([TransformerBlock(model.config) for _ in range(num_clusters-1)])
+        model.cluster_linear = torch.nn.ModuleList([nn.Linear(model.config.dim, model.config.dim) for _ in range(num_clusters)])
+        model.cluster_dropout = nn.Dropout(0.3)
+        model.cluster_non_linearity = nn.LeakyReLU()
+        # init weights with last transformer values
+        for module in model.cluster_transformers:
+            module.load_state_dict(model.distilbert.transformer.layer[-1].state_dict())
         model.lin_query = torch.nn.Linear(model.config.dim, model.config.dim)
         # for module in model.cluster_transformers.modules():
         #     init_weights(module)
@@ -42,7 +48,9 @@ class ClusterModel(DistilBertForQuestionAnswering):
         model.num_clusters = num_clusters
         torch.nn.init.xavier_uniform_(model.cluster_keys)
         torch.nn.init.xavier_uniform_(model.lin_query.weight)
-        model.gamma = 3
+        for i in range(num_clusters):
+            torch.nn.init.xavier_uniform_(model.cluster_linear[i].weight)
+        model.gamma = 0.1
         # s.forward = cls.forward
         return model
 
@@ -77,22 +85,30 @@ class ClusterModel(DistilBertForQuestionAnswering):
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=True,
             return_dict=return_dict,
         )
-        hidden_states = distilbert_output[0]  # (bs, max_query_len, dim)
+        first_cluster_hidden_states = distilbert_output[0]  # (bs, max_query_len, dim)
         # final_attention = distilbert_output[1][-1]
         # Compute cluster logits based on [CLS] token
         # queries = self.lin_query(hidden_states[:,0,:])
         # queries /= math.sqrt(self.config.dim)
         # cluster_logits = self.cluster_keys(queries)    # (bs, num_clusters)
-        cluster_hidden_states = []
-        cluster_queries = []
-        for cluster_idx in range(self.num_clusters):
-            cluster_hidden_state = self.cluster_transformers[cluster_idx](hidden_states, attn_mask=attention_mask, head_mask=head_mask)[0]   # (bs, max_query_len, dim)
-            queries = self.lin_query(cluster_hidden_state[:, 0, :])     # (bs, dim)
+        cluster_hidden_states = [self.cluster_non_linearity(self.cluster_dropout(self.cluster_linear[0](first_cluster_hidden_states))).unsqueeze(dim=1)]
+        cluster_queries = [self.lin_query(first_cluster_hidden_states[:,0,:]).unsqueeze(dim=1)]
+        # cluster_queries = [cluster_hidden_states[0].squeeze(dim=1)[:, 0, :].unsqueeze(dim=1)]
+        for cluster_idx in range(self.num_clusters-1):
+            cluster_hidden_state = self.cluster_transformers[cluster_idx](distilbert_output[1][-2], attn_mask=attention_mask, head_mask=head_mask)[0]   # (bs, max_query_len, dim)
+            queries = self.lin_query(cluster_hidden_state[:, 0, :])  # (bs, dim)
             queries = queries.unsqueeze(dim=1)
             cluster_queries.append(queries)
+            cluster_hidden_state = self.cluster_linear[cluster_idx+1](cluster_hidden_state)
+            cluster_hidden_state = self.cluster_dropout(cluster_hidden_state)
+            cluster_hidden_state = self.cluster_non_linearity(cluster_hidden_state)
+            # queries = self.lin_query(cluster_hidden_state[:, 0, :])  # (bs, dim)
+            # queries = cluster_hidden_state[:, 0, :]
+            # queries = queries.unsqueeze(dim=1)
+            # cluster_queries.append(queries)
             cluster_hidden_state = torch.unsqueeze(cluster_hidden_state, dim=1)    # (bs, 1, max_query_len, dim)
             cluster_hidden_states.append(cluster_hidden_state)
         cluster_hidden_states = torch.cat(cluster_hidden_states, dim=1)     # (bs, num_clusters, max_query_len, dim)
@@ -100,10 +116,13 @@ class ClusterModel(DistilBertForQuestionAnswering):
         cluster_queries /= math.sqrt(self.config.dim)
         cluster_logits = torch.sum(cluster_queries*self.cluster_keys, dim=-1)   # (bs, num_clusters, dim) * (num_clusters, dim) then (bs, num_clusters)
         cluster_coefficients = F.softmax(cluster_logits, dim=-1)       # (bs, num_clusters)
+        # import pdb; pdb.set_trace()
+        # loss = self.gamma*torch.mean(-torch.log(torch.max(cluster_coefficients, dim=-1)[0]), dim=0)
+        # print(cluster_coefficients[0])
+        # loss = self.gamma * torch.mean(-torch.log(1 - cluster_coefficients[:,0]), dim=0)
+        # import pdb; pdb.set_trace()
+        # print("LOSS: {}".format(loss))
         print(cluster_coefficients[0])
-        loss = self.gamma*torch.mean(-torch.log(1-torch.max(cluster_coefficients, dim=-1)[0]), dim=0)
-        print("LOSS: {}".format(loss))
-        # print(cluster_coefficients)
         # Penalize variance? --> i.e. (0.5, 0.5) is ok but (0.33, 0.2, 0.2, 0.1,....) is not
         # max_coeffs =
         # total_loss +=
@@ -120,6 +139,9 @@ class ClusterModel(DistilBertForQuestionAnswering):
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
         end_logits = end_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
+        # import pdb;
+        # pdb.set_trace()
+
         # print(loss)
         total_loss = None
         if start_positions is not None and end_positions is not None:
@@ -137,9 +159,9 @@ class ClusterModel(DistilBertForQuestionAnswering):
             start_loss = loss_fct(start_logits, start_positions)
             end_loss = loss_fct(end_logits, end_positions)
             total_loss = (start_loss + end_loss) / 2
-            curr = total_loss
-            total_loss += loss
-            print("TOTAL LOSS: {}".format(total_loss))
+            # curr = total_loss
+            # total_loss += loss
+            # print("TOTAL LOSS: {}".format(total_loss))
             # print(curr, loss)
         if not return_dict:
             output = (start_logits, end_logits) + distilbert_output[1:]

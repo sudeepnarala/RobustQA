@@ -6,6 +6,7 @@ import torch
 import csv
 import util
 from transformers import DistilBertTokenizerFast
+tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 from transformers import DistilBertForQuestionAnswering
 from transformers import AdamW
 from tensorboardX import SummaryWriter
@@ -264,7 +265,7 @@ def main():
     # model = ClusterModel.from_pretrained("distilbert-base-uncased", num_clusters=6)
     checkpoint_path = os.path.join("save/baseline-02/checkpoint")
     # TODO: Change this, manually loading from baseline-02
-    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=5)
+    model = ClusterModel.from_pretrained(checkpoint_path, num_clusters=2)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
@@ -288,7 +289,8 @@ def main():
         # import pdb; pdb.set_trace();
         # Freeze Distilbert
         model.distilbert.transformer.requires_grad_(False)
-        model.distilbert.transformer.layer[4].requires_grad_(True)
+        model.distilbert.transformer.layer[-2].requires_grad_(True)  # This is a cluster layer
+        model.distilbert.transformer.layer[-1].requires_grad_(True)     # This is a cluster layer
         best_scores = trainer.train(model, train_loader, val_loader, val_dict)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
