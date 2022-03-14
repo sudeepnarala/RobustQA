@@ -151,7 +151,7 @@ class Trainer():
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         self.device = args.device
-
+        self.device = 'cpu'
     def save(self, model):
         model.save_pretrained(self.path)
 
@@ -160,10 +160,9 @@ class Trainer():
     # This is final prediction evaluation
     def evaluate(self, model, data_loader, data_dict, return_preds=False, split='validation'):
         device = self.device
-
         model.eval()
         pred_dict = {}
-
+        i = 0
         all_start_logits_meta = []
         all_end_logits_meta = []
         # with torch.no_grad(), \
@@ -171,13 +170,15 @@ class Trainer():
             for task_batch in data_loader:
                 # Change "parallel" weights for each task based on support
                 for task in task_batch:
+                    i += 1
+                    #print(i)
                     batch = task["support"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
                         batch[key] = batch[key].squeeze(0)
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    batch_size = len(input_ids)
+                    #input_ids = batch['input_ids'].to(device)
+                    #attention_mask = batch['attention_mask'].to(device)
+                    #batch_size = len(input_ids)
                     # Adapt theta for meta-learning
                     # Change weights based on forward from "support"
                     alpha = 0.4
@@ -187,7 +188,7 @@ class Trainer():
                     loss = out[0]
                     grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
                     meta_weight = weights - alpha*grad
-                    meta_weight.requires_grad = False
+                    #meta_weight.requires_grad = False
                     batch = task["query"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
@@ -204,6 +205,7 @@ class Trainer():
 
                         all_start_logits_meta.append(start_logits_meta.cpu().detach().numpy())
                         all_end_logits_meta.append(end_logits_meta.cpu().detach().numpy())
+                    model.qa_outputs.weight = copy.copy(weights)
                     # progress_bar.update(batch_size)
 
       
@@ -256,16 +258,24 @@ class Trainer():
             for key in qa_query:
                 qa_query[key] = qa_query[key].to(self.device)
                 qa_query[key] = qa_query[key].squeeze(0)
+            #uncomment for reptile:
+            #pre_reptile = copy.copy(model.qa_outputs.weight)
             params = self.inner_loop(qa_support, model)
             # outputs = model(input_ids, attention_mask=attention_mask,
             #                 start_positions=start_positions,
             #                 end_positions=end_positions)
             # Overwrite the model linear weights with params, assume inner_loop returns the weights of last layer
+            
+            #REPTILE step
+            # params = pre_reptile + 0.03*(params - pre_reptile)
             model.qa_outputs.weight = torch.nn.Parameter(params)
+            
             out = model(**qa_query)
             loss = out[0]
             outer_loss_batch.append(loss)
+            
         outer_loss = torch.mean(torch.stack(outer_loss_batch))
+        #COMMENT OUT BELOW IF REPTILE
         model.qa_outputs.weight = weight_orig
         return outer_loss
 
@@ -305,10 +315,12 @@ class Trainer():
 # loss = outputs[0]
 # loss.backward()
 #                     model.parallel.requires_grad_(False)
+                    
                     loss = self.outer_step(task_batch, model)
+                    #Comment out below if doing reptile
                     loss.backward()
                     optim.step()
-
+            
             self.save(model)
         return 0
 
@@ -404,6 +416,7 @@ def main():
         best_scores = trainer.train(model, train_loader)
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        args.device = 'cpu'
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
         log = util.get_logger(args.save_dir, f'log_{split_name}')
         trainer = Trainer(args, log)
