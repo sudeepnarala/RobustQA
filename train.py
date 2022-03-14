@@ -9,6 +9,7 @@ from transformers import DistilBertTokenizerFast
 from transformers import DistilBertForQuestionAnswering
 from transformers import AdamW
 from tensorboardX import SummaryWriter
+from bert_override import DistilBertForQuestionAnsweringScaledPenalty
 
 
 from torch.utils.data import DataLoader
@@ -256,7 +257,8 @@ def main():
     args = get_train_test_args()
 
     util.set_seed(args.seed)
-    model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
+    model = DistilBertForQuestionAnsweringScaledPenalty.from_pretrained("distilbert-base-uncased")
+    # model = DistilBertForQuestionAnsweringScaledPenalty.from_pretrained("save/baseline-02/checkpoint")
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
 
     if args.do_train:
