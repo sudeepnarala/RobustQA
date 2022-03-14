@@ -187,7 +187,7 @@ class Trainer():
                     loss = out[0]
                     grad = torch.autograd.grad(loss, weights, create_graph=True)[0]
                     meta_weight = weights - alpha*grad
-                    meta_weight = meta_weight.cpu().detach()
+                    meta_weight.requires_grad = False
                     batch = task["query"]
                     for key in batch:
                         batch[key] = batch[key].to(self.device)
